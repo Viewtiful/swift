@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -27,6 +27,8 @@ namespace llvm {
 }
 
 namespace swift {
+  class AssociatedConformance;
+  class AssociatedType;
   class CanType;
   class FuncDecl;
   class ProtocolConformanceRef;
@@ -37,7 +39,7 @@ namespace swift {
 namespace irgen {
   class Address;
   class Explosion;
-  class CallEmission;
+  class FunctionPointer;
   class IRGenFunction;
   class IRGenModule;
   class MetadataPath;
@@ -50,15 +52,20 @@ namespace irgen {
   /// Set an LLVM value name for the given protocol witness table.
   void setProtocolWitnessTableName(IRGenModule &IGM, llvm::Value *value,
                                    CanType type, ProtocolDecl *protocol);
-  
+
+  /// Extract the method pointer from the given witness table
+  /// as a function value.
+  FunctionPointer emitWitnessMethodValue(IRGenFunction &IGF,
+                                         llvm::Value *wtable,
+                                         SILDeclRef member);
+
   /// Extract the method pointer from an archetype's witness table
   /// as a function value.
-  void emitWitnessMethodValue(IRGenFunction &IGF,
-                              CanType baseTy,
-                              llvm::Value **baseMetadataCache,
-                              SILDeclRef member,
-                              ProtocolConformanceRef conformance,
-                              Explosion &out);
+  FunctionPointer emitWitnessMethodValue(IRGenFunction &IGF,
+                                         CanType baseTy,
+                                         llvm::Value **baseMetadataCache,
+                                         SILDeclRef member,
+                                         ProtocolConformanceRef conformance);
 
   /// Given a type T and an associated type X of some protocol P to
   /// which T conforms, return the type metadata for T.X.
@@ -69,25 +76,13 @@ namespace irgen {
   llvm::Value *emitAssociatedTypeMetadataRef(IRGenFunction &IGF,
                                              llvm::Value *parentMetadata,
                                              llvm::Value *wtable,
-                                           AssociatedTypeDecl *associatedType);
+                                             AssociatedType associatedType);
 
-  /// Given a type T and an associated type X of a protocol PT to which
-  /// T conforms, where X is required to implement some protocol PX, return
-  /// the witness table witnessing the conformance of T.X to PX.
-  ///
-  /// PX must be a direct requirement of X.
-  ///
-  /// \param parentMetadata - the type metadata for T
-  /// \param wtable - the witness table witnessing the conformance of T to PT
-  /// \param associatedType - the declaration of X; a member of PT
-  /// \param associatedTypeMetadata - the type metadata for T.X
-  /// \param associatedProtocol - the declaration of PX
-  llvm::Value *emitAssociatedTypeWitnessTableRef(IRGenFunction &IGF,
-                                                 llvm::Value *parentMetadata,
-                                                 llvm::Value *wtable,
-                                          AssociatedTypeDecl *associatedType,
-                                          llvm::Value *associatedTypeMetadata,
-                                          ProtocolDecl *associatedProtocol);
+  // Return the offset one should do on a witness table pointer to retrieve the
+  // `index`th piece of private data.
+  inline int privateWitnessTableIndexToTableOffset(unsigned index) {
+    return -1 - (int)index;
+  }
 
   /// Add the witness parameters necessary for calling a function with
   /// the given generics clause.
@@ -135,15 +130,19 @@ namespace irgen {
   /// generics clause.
   void emitPolymorphicArguments(IRGenFunction &IGF,
                                 CanSILFunctionType origType,
-                                CanSILFunctionType substType,
-                                ArrayRef<Substitution> subs,
+                                const SubstitutionMap &subs,
                                 WitnessMetadata *witnessMetadata,
                                 Explosion &args);
 
+  /// Bind the polymorphic parameter inside of a partial apply forwarding thunk.
+  void bindPolymorphicParameter(IRGenFunction &IGF,
+                                CanSILFunctionType &OrigFnType,
+                                CanSILFunctionType &SubstFnType,
+                                Explosion &nativeParam, unsigned paramIndex);
+
   /// Emit references to the witness tables for the substituted type
   /// in the given substitution.
-  void emitWitnessTableRefs(IRGenFunction &IGF,
-                            const Substitution &sub,
+  void emitWitnessTableRefs(IRGenFunction &IGF, const Substitution &sub,
                             llvm::Value **metadataCache,
                             SmallVectorImpl<llvm::Value *> &out);
 

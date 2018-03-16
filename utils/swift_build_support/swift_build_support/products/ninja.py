@@ -2,11 +2,11 @@
 #
 # This source file is part of the Swift.org open source project
 #
-# Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+# Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 # Licensed under Apache License v2.0 with Runtime Library Exception
 #
-# See http://swift.org/LICENSE.txt for license information
-# See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+# See https://swift.org/LICENSE.txt for license information
+# See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 #
 # ----------------------------------------------------------------------------
 """
@@ -21,6 +21,7 @@ import sys
 from . import product
 from .. import cache_util
 from .. import shell
+from .. import xcrun
 
 
 class Ninja(product.Product):
@@ -33,19 +34,22 @@ class Ninja(product.Product):
             return
 
         env = None
-        if platform.system() == "Darwin":
-            from .. import xcrun
-            sysroot = xcrun.sdk_path("macosx")
-            osx_version_min = self.args.darwin_deployment_version_osx
+        if platform.system() == 'Darwin':
+            sysroot = os.environ.get('SDKROOT', xcrun.sdk_path('macosx'))
             assert sysroot is not None
+
+            osx_version_min = self.args.darwin_deployment_version_osx
             env = {
-                "CXX": self.toolchain.cxx,
-                "CFLAGS": (
-                    "-isysroot {sysroot} -mmacosx-version-min={osx_version}"
-                ).format(sysroot=sysroot, osx_version=osx_version_min),
-                "LDFLAGS": (
-                    "-mmacosx-version-min={osx_version}"
-                ).format(osx_version=osx_version_min),
+                'CXX': self.toolchain.cxx,
+                'CFLAGS': ' '.join([
+                    '-isysroot', sysroot,
+                    '-mmacosx-version-min={}'.format(osx_version_min),
+                ]),
+                'LDFLAGS': '-mmacosx-version-min={}'.format(osx_version_min),
+            }
+        elif self.toolchain.cxx:
+            env = {
+                'CXX': self.toolchain.cxx,
             }
 
         # Ninja can only be built in-tree.  Copy the source tree to the build

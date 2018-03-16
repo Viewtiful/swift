@@ -2,19 +2,19 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "arc-sequence-opts"
+
 #include "RefCountState.h"
 #include "ARCMatchingSet.h"
 #include "swift/Basic/BlotMapVector.h"
-#include "swift/Basic/Fallthrough.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILVisitor.h"
 #include "swift/SILOptimizer/Utils/Local.h"
@@ -70,12 +70,12 @@ ARCMatchingSetBuilder::matchIncrementsToDecrements() {
     // We need to be known safe over all increments/decrements we are matching
     // up to ignore insertion points.
     bool BUIsKnownSafe = (*BURefCountState)->second.isKnownSafe();
-    DEBUG(llvm::dbgs() << "        KNOWNSAFE: "
+    DEBUG(llvm::dbgs() << "        BOTTOM UP KNOWNSAFE: "
                        << (BUIsKnownSafe ? "true" : "false") << "\n");
     Flags.KnownSafe &= BUIsKnownSafe;
 
     bool BUCodeMotionSafe = (*BURefCountState)->second.isCodeMotionSafe();
-    DEBUG(llvm::dbgs() << "        KNOWNSAFE: "
+    DEBUG(llvm::dbgs() << "        BOTTOM UP CODEMOTIONSAFE: "
                        << (BUIsKnownSafe ? "true" : "false") << "\n");
     Flags.CodeMotionSafe &= BUCodeMotionSafe;
 
@@ -153,12 +153,12 @@ ARCMatchingSetBuilder::matchDecrementsToIncrements() {
     // We need to be known safe over all increments/decrements we are matching
     // up to ignore insertion points.
     bool TDIsKnownSafe = (*TDRefCountState)->second.isKnownSafe();
-    DEBUG(llvm::dbgs() << "        KNOWNSAFE: "
+    DEBUG(llvm::dbgs() << "        TOP DOWN KNOWNSAFE: "
                        << (TDIsKnownSafe ? "true" : "false") << "\n");
     Flags.KnownSafe &= TDIsKnownSafe;
 
     bool TDCodeMotionSafe = (*TDRefCountState)->second.isCodeMotionSafe();
-    DEBUG(llvm::dbgs() << "        KNOWNSAFE: "
+    DEBUG(llvm::dbgs() << "        TOP DOWN CODEMOTIONSAFE: "
                        << (TDIsKnownSafe ? "true" : "false") << "\n");
     Flags.CodeMotionSafe &= TDCodeMotionSafe;
 

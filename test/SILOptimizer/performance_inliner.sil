@@ -1,4 +1,6 @@
-// RUN: %target-sil-opt -enable-sil-verify-all %s -inline -sil-combine | %FileCheck %s
+// REQUIRES: plus_one_runtime
+
+// RUN: %target-sil-opt -assume-parsing-unqualified-ownership-sil -enable-sil-verify-all %s -inline -sil-combine | %FileCheck %s
 
 sil_stage canonical
 
@@ -285,26 +287,36 @@ sil @trivial_fun : $@convention(thin) () -> (Builtin.Int64) {
   return %0 : $Builtin.Int64
 }
 
+protocol P {}
+extension Int64: P {}
+
 // We can inline function_refs with witness_method calling convention.
-sil @trivial_witness_method : $@convention(witness_method) (@inout Builtin.Int64) -> Builtin.Int64 {
-bb0(%0 : $*Builtin.Int64):
-  %1 = load %0 : $*Builtin.Int64
-  return %1 : $Builtin.Int64
+sil @trivial_witness_method : $@convention(witness_method: P) (@inout Int64) -> Int64 {
+bb0(%0 : $*Int64):
+  %1 = load %0 : $*Int64
+  return %1 : $Int64
 }
 
 // CHECK-LABEL: sil @trivial_witness_method_caller : $@convention(thin) () -> ()
-// CHECK-NOT: apply
+// CHECK-NOT: apply .*@convention(witness_method
 // CHECK: return
 sil @trivial_witness_method_caller : $@convention(thin) () -> () {
-  %0 = alloc_stack $Builtin.Int64
-  %1 = integer_literal $Builtin.Int64, 0
-  store %1 to %0 : $*Builtin.Int64
-  %2 = function_ref @trivial_witness_method : $@convention(witness_method) (@inout Builtin.Int64) -> Builtin.Int64
-  apply %2 (%0) : $@convention(witness_method) (@inout Builtin.Int64) -> Builtin.Int64
-  dealloc_stack %0 : $*Builtin.Int64
-  %3 = tuple()
-  return %3 : $()
+  %0 = alloc_box ${ var Int64 }, var, name "x"
+  %1 = project_box %0 : ${ var Int64 }, 0
+  %2 = function_ref @$Ss5Int64V22_builtinIntegerLiteralABBi2048__tcfC : $@convention(method) (Builtin.Int2048, @thin Int64.Type) -> Int64 // user: %5
+  %3 = metatype $@thin Int64.Type
+  %4 = integer_literal $Builtin.Int2048, 0
+  %5 = apply %2(%4, %3) : $@convention(method) (Builtin.Int2048, @thin Int64.Type) -> Int64
+  store %5 to %1 : $*Int64
+  %6 = function_ref @trivial_witness_method : $@convention(witness_method: P) (@inout Int64) -> Int64
+  %7 = apply %6 (%1) : $@convention(witness_method: P) (@inout Int64) -> Int64
+  %8 = tuple()
+  return %8 : $()
 }
+
+// Int64.init(_builtinIntegerLiteral:)
+sil [transparent] [serialized] @$Ss5Int64V22_builtinIntegerLiteralABBi2048__tcfC : $@convention(method) (Builtin.Int2048, @thin Int64.Type) -> Int64
+
 
 // We can inline function_refs with c calling convention.
 sil @trivial_c : $@convention(c) (@inout Builtin.Int64) -> Builtin.Int64 {
@@ -412,25 +424,25 @@ entry:
   return undef : $()
 }
 
-sil [fragile] @fragile_function : $@convention(thin) () -> () {
+sil [serialized] @fragile_function : $@convention(thin) () -> () {
 entry:
   return undef : $()
 }
 
-// CHECK-LABEL: sil [fragile] @fragile_calls_resilient : $@convention(thin) () -> () {
+// CHECK-LABEL: sil [serialized] @fragile_calls_resilient : $@convention(thin) () -> () {
 // CHECK: function_ref @resilient_function
 // CHECK: return
-sil [fragile] @fragile_calls_resilient : $@convention(thin) () -> () {
+sil [serialized] @fragile_calls_resilient : $@convention(thin) () -> () {
 entry:
   %f = function_ref @resilient_function : $@convention(thin) () -> ()
   %z = apply %f() : $@convention(thin) () -> ()
   return %z : $()
 }
 
-// CHECK-LABEL: sil [fragile] @fragile_calls_fragile : $@convention(thin) () -> () {
+// CHECK-LABEL: sil [serialized] @fragile_calls_fragile : $@convention(thin) () -> () {
 // CHECK-NOT: function_ref @resilient_function
 // CHECK: return
-sil [fragile] @fragile_calls_fragile : $@convention(thin) () -> () {
+sil [serialized] @fragile_calls_fragile : $@convention(thin) () -> () {
 entry:
   %f = function_ref @fragile_function : $@convention(thin) () -> ()
   %z = apply %f() : $@convention(thin) () -> ()
@@ -786,7 +798,7 @@ bb2:                                              // Preds: bb0 bb1
   return %16 : $()                                // id: %17
 }
 
-sil [transparent] @slowHelper : $@convention(thin) () -> () {
+sil @slowHelper : $@convention(thin) () -> () {
 bb0:
   // make it a non-trivial function
   %f = function_ref @unknown_function : $@convention(thin) () -> ()
@@ -882,7 +894,7 @@ bb2:
 // from the performance inliner doesn't result in an assert/crash.
 
 class C {
-  @inline(never) func callThrowing<T>(other: T, closure: () throws -> T) -> T
+  @inline(never) func callThrowing<T>(other: T, closure: @escaping () throws -> T) -> T
 }
 
 // CHECK-LABEL: sil [noinline] @callThrowing
@@ -957,5 +969,5 @@ bb2(%7 : $Error):
 }
 
 sil_vtable C {
-  #C.callThrowing!1: callThrowing
+  #C.callThrowing!1: @callThrowing
 }

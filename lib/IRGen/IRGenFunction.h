@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -37,23 +37,10 @@ namespace llvm {
 
 namespace swift {
   class ArchetypeType;
-  class AssociatedTypeDecl;
-  class ClassDecl;
-  class ConstructorDecl;
-  class Decl;
-  class ExtensionDecl;
-  class FuncDecl;
-  class EnumElementDecl;
-  class EnumType;
-  class Pattern;
-  class PatternBindingDecl;
+  class IRGenOptions;
   class SILDebugScope;
   class SILType;
   class SourceLoc;
-  class StructType;
-  class Substitution;
-  class ValueDecl;
-  class VarDecl;
 
 namespace Lowering {
   class TypeConverter;
@@ -79,12 +66,18 @@ public:
   IRGenModule &IGM;
   IRBuilder Builder;
 
+  /// If != OptimizationMode::NotSet, the optimization mode specified with an
+  /// function attribute.
+  OptimizationMode OptMode;
+
   llvm::Function *CurFn;
   ModuleDecl *getSwiftModule() const;
   SILModule &getSILModule() const;
   Lowering::TypeConverter &getSILTypes() const;
+  const IRGenOptions &getOptions() const;
 
   IRGenFunction(IRGenModule &IGM, llvm::Function *fn,
+                OptimizationMode Mode = OptimizationMode::NotSet,
                 const SILDebugScope *DbgScope = nullptr,
                 Optional<SILLocation> DbgLoc = None);
   ~IRGenFunction();
@@ -96,7 +89,8 @@ public:
 //--- Function prologue and epilogue -------------------------------------------
 public:
   Explosion collectParameters();
-  void emitScalarReturn(SILType resultTy, Explosion &scalars);
+  void emitScalarReturn(SILType resultTy, Explosion &scalars,
+                        bool isSwiftCCReturn, bool isOutlined);
   void emitScalarReturn(llvm::Type *resultTy, Explosion &scalars);
   
   void emitBBForReturn();
@@ -111,6 +105,21 @@ public:
 
   /// Set the error result slot.
   void setErrorResultSlot(llvm::Value *address);
+
+  /// Are we currently emitting a coroutine?
+  bool isCoroutine() {
+    return CoroutineHandle != nullptr;
+  }
+  llvm::Value *getCoroutineHandle() {
+    assert(isCoroutine());
+    return CoroutineHandle;
+  }
+
+  void setCoroutineHandle(llvm::Value *handle) {
+    assert(CoroutineHandle == nullptr && "already set handle");
+    assert(handle != nullptr && "setting a null handle");
+    CoroutineHandle = handle;
+  }
   
 private:
   void emitPrologue();
@@ -119,14 +128,31 @@ private:
   Address ReturnSlot;
   llvm::BasicBlock *ReturnBB;
   llvm::Value *ErrorResultSlot = nullptr;
+  llvm::Value *CoroutineHandle = nullptr;
 
 //--- Helper methods -----------------------------------------------------------
 public:
+
+  /// Returns the optimization mode for the function. If no mode is set for the
+  /// function, returns the global mode, i.e. the mode in IRGenOptions.
+  OptimizationMode getEffectiveOptimizationMode() const;
+
+  /// Returns true if this function should be optimized for size.
+  bool optimizeForSize() const {
+    return getEffectiveOptimizationMode() == OptimizationMode::ForSize;
+  }
+
   Address createAlloca(llvm::Type *ty, Alignment align,
-                       const llvm::Twine &name);
-  Address createAlloca(llvm::Type *ty, llvm::Value *ArraySize, Alignment align,
-                       const llvm::Twine &name);
+                       const llvm::Twine &name = "");
+  Address createAlloca(llvm::Type *ty, llvm::Value *arraySize, Alignment align,
+                       const llvm::Twine &name = "");
   Address createFixedSizeBufferAlloca(const llvm::Twine &name);
+
+  StackAddress emitDynamicAlloca(SILType type, const llvm::Twine &name = "");
+  StackAddress emitDynamicAlloca(llvm::Type *eltTy, llvm::Value *arraySize,
+                                 Alignment align,
+                                 const llvm::Twine &name = "");
+  void emitDeallocateDynamicAlloca(StackAddress address);
 
   llvm::BasicBlock *createBasicBlock(const llvm::Twine &Name);
   const TypeInfo &getTypeInfoForUnlowered(Type subst);
@@ -148,6 +174,13 @@ public:
   Address emitByteOffsetGEP(llvm::Value *base, llvm::Value *offset,
                             const TypeInfo &type,
                             const llvm::Twine &name = "");
+  Address emitAddressAtOffset(llvm::Value *base, Offset offset,
+                              llvm::Type *objectType,
+                              Alignment objectAlignment,
+                              const llvm::Twine &name = "");
+
+  llvm::Value *emitInvariantLoad(Address address,
+                                 const llvm::Twine &name = "");
 
   void emitStoreOfRelativeIndirectablePointer(llvm::Value *value,
                                               Address addr,
@@ -165,6 +198,9 @@ public:
   llvm::Value *emitInitStackObjectCall(llvm::Value *metadata,
                                        llvm::Value *object,
                                        const llvm::Twine &name = "");
+  llvm::Value *emitInitStaticObjectCall(llvm::Value *metadata,
+                                        llvm::Value *object,
+                                        const llvm::Twine &name = "");
   llvm::Value *emitVerifyEndOfLifetimeCall(llvm::Value *object,
                                            const llvm::Twine &name = "");
   llvm::Value *emitAllocRawCall(llvm::Value *size, llvm::Value *alignMask,
@@ -176,9 +212,22 @@ public:
                          llvm::Value *&box,
                          llvm::Value *&valueAddress);
 
+  void emitMakeBoxUniqueCall(llvm::Value *box, llvm::Value *typeMetadata,
+                             llvm::Value *alignMask, llvm::Value *&outBox,
+                             llvm::Value *&outValueAddress);
+
   void emitDeallocBoxCall(llvm::Value *box, llvm::Value *typeMetadata);
 
+  void emitTSanInoutAccessCall(llvm::Value *address);
+
   llvm::Value *emitProjectBoxCall(llvm::Value *box, llvm::Value *typeMetadata);
+
+  llvm::Value *emitAllocEmptyBoxCall();
+
+  // Emit a call to the given generic type metadata access function.
+  llvm::CallInst *emitGenericTypeMetadataAccessFunctionCall(
+                                          llvm::Function *accessFunction,
+                                          ArrayRef<llvm::Value *> args);
 
   // Emit a reference to the canonical type metadata record for the given AST
   // type. This can be used to identify the type at runtime. For types with
@@ -205,11 +254,14 @@ public:
   llvm::Value *emitTypeMetadataRefForLayout(SILType type);
   
   llvm::Value *emitValueWitnessTableRef(CanType type);
-  llvm::Value *emitValueWitnessTableRefForLayout(SILType type);
+  llvm::Value *emitValueWitnessTableRef(SILType type,
+                                        llvm::Value **metadataSlot = nullptr);
   llvm::Value *emitValueWitnessTableRefForMetadata(llvm::Value *metadata);
   
-  llvm::Value *emitValueWitness(CanType type, ValueWitness index);
-  llvm::Value *emitValueWitnessForLayout(SILType type, ValueWitness index);
+  llvm::Value *emitValueWitnessValue(SILType type, ValueWitness index);
+  FunctionPointer emitValueWitnessFunctionRef(SILType type,
+                                              llvm::Value *&metadataSlot,
+                                              ValueWitness index);
 
   /// Emit a load of a reference to the given Objective-C selector.
   llvm::Value *emitObjCSelectorRefLoad(StringRef selector);
@@ -224,12 +276,18 @@ public:
   /// Mark a load as dereferenceable to `size` bytes.
   void setDereferenceableLoad(llvm::LoadInst *load, unsigned size);
 
+  /// Emit a non-mergeable trap call, optionally followed by a terminator.
+  void emitTrap(bool EmitUnreachable);
+
 private:
   llvm::Instruction *AllocaIP;
   const SILDebugScope *DbgScope;
 
 //--- Reference-counting methods -----------------------------------------------
 public:
+  // Returns the default atomicity of the module.
+  Atomicity getDefaultAtomicity();
+
   llvm::Value *emitUnmanagedAlloc(const HeapLayout &layout,
                                   const llvm::Twine &name,
                                   llvm::Constant *captureDescriptor,
@@ -247,11 +305,15 @@ public:
   llvm::Value *emitLoadRefcountedPtr(Address addr, ReferenceCounting style);
 
   //   - unowned references
-  void emitUnownedRetain(llvm::Value *value, ReferenceCounting style);
-  void emitUnownedRelease(llvm::Value *value, ReferenceCounting style);
-  void emitStrongRetainUnowned(llvm::Value *value, ReferenceCounting style);
+  void emitUnownedRetain(llvm::Value *value, ReferenceCounting style,
+                         Atomicity atomicity);
+  void emitUnownedRelease(llvm::Value *value, ReferenceCounting style,
+                          Atomicity atomicity);
+  void emitStrongRetainUnowned(llvm::Value *value, ReferenceCounting style,
+                               Atomicity atomicity);
   void emitStrongRetainAndUnownedRelease(llvm::Value *value,
-                                         ReferenceCounting style);
+                                         ReferenceCounting style,
+                                         Atomicity atomicity);
   void emitUnownedInit(llvm::Value *val, Address dest, ReferenceCounting style);
   void emitUnownedAssign(llvm::Value *value, Address dest,
                          ReferenceCounting style);
@@ -294,16 +356,15 @@ public:
   //   - strong references
   void emitNativeStrongAssign(llvm::Value *value, Address addr);
   void emitNativeStrongInit(llvm::Value *value, Address addr);
-  void emitNativeStrongRetain(llvm::Value *value,
-                              Atomicity atomicity = Atomicity::Atomic);
-  void emitNativeStrongRelease(llvm::Value *value,
-                               Atomicity atomicity = Atomicity::Atomic);
+  void emitNativeStrongRetain(llvm::Value *value, Atomicity atomicity);
+  void emitNativeStrongRelease(llvm::Value *value, Atomicity atomicity);
   void emitNativeSetDeallocating(llvm::Value *value);
   //   - unowned references
-  void emitNativeUnownedRetain(llvm::Value *value);
-  void emitNativeUnownedRelease(llvm::Value *value);
-  void emitNativeStrongRetainUnowned(llvm::Value *value);
-  void emitNativeStrongRetainAndUnownedRelease(llvm::Value *value);
+  void emitNativeUnownedRetain(llvm::Value *value, Atomicity atomicity);
+  void emitNativeUnownedRelease(llvm::Value *value, Atomicity atomicity);
+  void emitNativeStrongRetainUnowned(llvm::Value *value, Atomicity atomicity);
+  void emitNativeStrongRetainAndUnownedRelease(llvm::Value *value,
+                                               Atomicity atomicity);
   void emitNativeUnownedInit(llvm::Value *val, Address dest);
   void emitNativeUnownedAssign(llvm::Value *value, Address dest);
   void emitNativeUnownedCopyInit(Address destAddr, Address srcAddr);
@@ -340,10 +401,8 @@ public:
   // Routines for an unknown reference-counting style (meaning,
   // dynamically something compatible with either the ObjC or Swift styles).
   //   - strong references
-  void emitUnknownStrongRetain(llvm::Value *value,
-                               Atomicity atomicity = Atomicity::Atomic);
-  void emitUnknownStrongRelease(llvm::Value *valuei,
-                                Atomicity atomicity = Atomicity::Atomic);
+  void emitUnknownStrongRetain(llvm::Value *value, Atomicity atomicity);
+  void emitUnknownStrongRelease(llvm::Value *value, Atomicity atomicity);
   //   - unowned references
   void emitUnknownUnownedInit(llvm::Value *val, Address dest);
   void emitUnknownUnownedAssign(llvm::Value *value, Address dest);
@@ -376,6 +435,8 @@ public:
   llvm::Value *emitIsUniqueCall(llvm::Value *value, SourceLoc loc,
                                 bool isNonNull, bool checkPinned);
 
+  llvm::Value *emitIsEscapingClosureCall(llvm::Value *value, SourceLoc loc);
+
 //--- Expression emission ------------------------------------------------------
 public:
   void emitFakeExplosion(const TypeInfo &type, Explosion &explosion);
@@ -386,23 +447,6 @@ public:
   void bindArchetype(ArchetypeType *type,
                      llvm::Value *metadata,
                      ArrayRef<llvm::Value*> wtables);
-
-  struct ArchetypeAccessPath {
-    CanArchetypeType BaseType;
-    AssociatedTypeDecl *Association;
-  };
-
-  /// Register an additional access path to the given archetype besides
-  /// (if applicable) just drilling down from its parent.
-  ///
-  /// This is necessary when an archetype gains conformances from an
-  /// associated type that it's been constrained to be equal to
-  /// but which is not simply its parent.
-  void addArchetypeAccessPath(CanArchetypeType targetArchetype,
-                              ArchetypeAccessPath accessPath);
-
-  ArrayRef<ArchetypeAccessPath>
-  getArchetypeAccessPaths(CanArchetypeType targetArchetype);
 
 //--- Type emission ------------------------------------------------------------
 public:
@@ -459,6 +503,13 @@ public:
   /// that we can reach from it.
   void bindLocalTypeDataFromTypeMetadata(CanType type, IsExact_t isExact,
                                          llvm::Value *metadata);
+
+  /// Given the witness table parameter, bind local type data for
+  /// the witness table itself and any conditional requirements.
+  void bindLocalTypeDataFromSelfWitnessTable(
+                const ProtocolConformance *conformance,
+                llvm::Value *selfTable,
+                llvm::function_ref<CanType (CanType)> mapTypeIntoContext);
 
   void setDominanceResolver(DominanceResolverFunction resolver) {
     assert(DominanceResolver == nullptr);
@@ -557,7 +608,7 @@ public:
 
   llvm::Value *getLocalSelfMetadata();
   void setLocalSelfMetadata(llvm::Value *value, LocalSelfKind kind);
-  
+
 private:
   LocalTypeDataCache &getOrCreateLocalTypeData();
   void destroyLocalTypeData();
@@ -574,9 +625,6 @@ private:
   llvm::Value *LocalSelf = nullptr;
   
   LocalSelfKind SelfKind;
-
-  llvm::DenseMap<CanType, std::vector<ArchetypeAccessPath>>
-  ArchetypeAccessPaths;
 };
 
 using ConditionalDominanceScope = IRGenFunction::ConditionalDominanceScope;

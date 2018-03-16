@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -35,8 +35,7 @@ SILCombiner::visitRefToRawPointerInst(RefToRawPointerInst *RRPI) {
   if (auto *URCI = dyn_cast<UncheckedRefCastInst>(RRPI->getOperand())) {
     // (ref_to_raw_pointer (unchecked_ref_cast x))
     //    -> (ref_to_raw_pointer x)
-    if (URCI->getOperand()->getType().getSwiftType()
-        ->isAnyClassReferenceType()) {
+    if (URCI->getOperand()->getType().isAnyClassReferenceType()) {
       RRPI->setOperand(URCI->getOperand());
       return URCI->use_empty() ? eraseInstFromFunction(*URCI) : nullptr;
     }
@@ -140,7 +139,8 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
 
         auto *NewPTAI = Builder.createPointerToAddress(PTAI->getLoc(), Ptr,
                                                        PTAI->getType(),
-                                                       PTAI->isStrict());
+                                                       PTAI->isStrict(),
+                                                       PTAI->isInvariant());
         auto DistanceAsWord = Builder.createBuiltin(
             PTAI->getLoc(), Trunc->getName(), Trunc->getType(), {}, Distance);
 
@@ -181,7 +181,7 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
       SILValue Distance = Bytes->getArguments()[0];
       auto *NewPTAI =
         Builder.createPointerToAddress(PTAI->getLoc(), Ptr, PTAI->getType(),
-                                       PTAI->isStrict());
+                                       PTAI->isStrict(), PTAI->isInvariant());
       return Builder.createIndexAddr(PTAI->getLoc(), NewPTAI, Distance);
     }
   }
@@ -236,9 +236,10 @@ SILCombiner::visitUncheckedAddrCastInst(UncheckedAddrCastInst *UADCI) {
   // larger OutputType (the actual memory object must be large enough to hold
   // both types). However, such address casts cannot be converted to value
   // casts.
-  if (!SILType::canUnsafeCastValue(InputTy, OutputTy, UADCI->getModule()))
+  if (!SILType::canPerformABICompatibleUnsafeCastValue(InputTy, OutputTy,
+                                                       UADCI->getModule())) {
     return nullptr;
-
+  }
   // For each user U of the unchecked_addr_cast...
   for (auto U : getNonDebugUses(UADCI))
     // Check if it is load. If it is not a load, bail...
@@ -257,7 +258,8 @@ SILCombiner::visitUncheckedAddrCastInst(UncheckedAddrCastInst *UADCI) {
     UI++;
 
     // Insert a new load from our source and bitcast that as appropriate.
-    LoadInst *NewLoad = Builder.createLoad(Loc, Op);
+    LoadInst *NewLoad =
+        Builder.createLoad(Loc, Op, LoadOwnershipQualifier::Unqualified);
     auto *BitCast = Builder.createUncheckedBitCast(Loc, NewLoad,
                                                     OutputTy.getObjectType());
     // Replace all uses of the old load with the new bitcasted result and erase
@@ -301,6 +303,20 @@ SILCombiner::visitUncheckedRefCastInst(UncheckedRefCastInst *URCI) {
   return nullptr;
 }
 
+
+SILInstruction *
+SILCombiner::visitBridgeObjectToRefInst(BridgeObjectToRefInst *BORI) {
+  // Fold noop casts through Builtin.BridgeObject.
+  // (bridge_object_to_ref (unchecked-ref-cast x BridgeObject) y)
+  //  -> (unchecked-ref-cast x y)
+  if (auto URC = dyn_cast<UncheckedRefCastInst>(BORI->getOperand()))
+    return Builder.createUncheckedRefCast(BORI->getLoc(), URC->getOperand(),
+                                          BORI->getType());
+  return nullptr;
+}
+
+
+
 SILInstruction *
 SILCombiner::visitUncheckedRefCastAddrInst(UncheckedRefCastAddrInst *URCI) {
   SILType SrcTy = URCI->getSrc()->getType();
@@ -321,11 +337,13 @@ SILCombiner::visitUncheckedRefCastAddrInst(UncheckedRefCastAddrInst *URCI) {
  
   SILLocation Loc = URCI->getLoc();
   Builder.setCurrentDebugScope(URCI->getDebugScope());
-  LoadInst *load = Builder.createLoad(Loc, URCI->getSrc());
+  LoadInst *load = Builder.createLoad(Loc, URCI->getSrc(),
+                                      LoadOwnershipQualifier::Unqualified);
   auto *cast = Builder.tryCreateUncheckedRefCast(Loc, load,
                                                  DestTy.getObjectType());
   assert(cast && "SILBuilder cannot handle reference-castable types");
-  Builder.createStore(Loc, cast, URCI->getDest());
+  Builder.createStore(Loc, cast, URCI->getDest(),
+                      StoreOwnershipQualifier::Unqualified);
 
   return eraseInstFromFunction(*URCI);
 }
@@ -501,6 +519,19 @@ visitCheckedCastAddrBranchInst(CheckedCastAddrBranchInst *CCABI) {
   return nullptr;
 }
 
+SILInstruction *SILCombiner::visitConvertEscapeToNoEscapeInst(
+    ConvertEscapeToNoEscapeInst *Cvt) {
+  auto *OrigThinToThick =
+      dyn_cast<ThinToThickFunctionInst>(Cvt->getConverted());
+  if (!OrigThinToThick)
+    return nullptr;
+  auto origFunType = OrigThinToThick->getType().getAs<SILFunctionType>();
+  auto NewTy = origFunType->getWithExtInfo(origFunType->getExtInfo().withNoEscape(true));
+
+  return Builder.createThinToThickFunction(
+      OrigThinToThick->getLoc(), OrigThinToThick->getOperand(),
+      SILType::getPrimitiveObjectType(NewTy));
+}
 /// Replace a convert_function that only has refcounting uses with its
 /// operand.
 SILInstruction *SILCombiner::visitConvertFunctionInst(ConvertFunctionInst *CFI) {
@@ -521,7 +552,8 @@ SILInstruction *SILCombiner::visitConvertFunctionInst(ConvertFunctionInst *CFI) 
   auto Converted = CFI->getConverted();
   while (!CFI->use_empty()) {
     auto *Use = *(CFI->use_begin());
-    assert(!Use->getUser()->hasValue() && "Did not expect user with a result!");
+    assert(Use->getUser()->getResults().empty() &&
+           "Did not expect user with a result!");
     Use->set(Converted);
   }
 

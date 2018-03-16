@@ -1,5 +1,5 @@
 // RUN: sed -n -e '/VERIFY_BEGIN/,/VERIFY_END$/ p' %s > %t_no_errors.swift
-// RUN: %target-swift-frontend -verify -parse %t_no_errors.swift
+// RUN: %target-swift-frontend -verify -typecheck %t_no_errors.swift
 
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=CONSTRUCTOR_SUPER_NO_DOT_1 > %t.super.txt
 // RUN: %FileCheck %s -check-prefix=COMMON_BASE_A_NO_DOT < %t.super.txt
@@ -8,6 +8,9 @@
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=CONSTRUCTOR_SUPER_DOT_1 > %t.super.txt
 // RUN: %FileCheck %s -check-prefix=COMMON_BASE_A_DOT < %t.super.txt
 // RUN: %FileCheck %s -check-prefix=CONSTRUCTOR_SUPER_DOT_1 < %t.super.txt
+
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=CONSTRUCTOR_SUPER_INIT_1 > %t.super.txt
+// RUN: %FileCheck %s -check-prefix=CONSTRUCTOR_SUPER_INIT_1 < %t.super.txt
 
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=CONSTRUCTOR_SUPER_INIT_PAREN_1 > %t.super.txt
 // RUN: %FileCheck %s -check-prefix=CONSTRUCTOR_SUPER_INIT_PAREN_1 < %t.super.txt
@@ -224,10 +227,14 @@ class SuperDerivedA : SuperBaseA {
   }
 
   init (a: Float) {
+    super.init#^CONSTRUCTOR_SUPER_INIT_1^#
+// CONSTRUCTOR_SUPER_INIT_1: Begin completions
+// CONSTRUCTOR_SUPER_INIT_1-DAG: Pattern/CurrModule: ()[#SuperBaseA#];
+// CONSTRUCTOR_SUPER_INIT_1: End completions
+  }
+  init (b: Float) {
     super.init(#^CONSTRUCTOR_SUPER_INIT_PAREN_1^#
-// CONSTRUCTOR_SUPER_INIT_PAREN_1: Begin completions
-// CONSTRUCTOR_SUPER_INIT_PAREN_1-DAG: Pattern/ExprSpecific: ['('])[#SuperBaseA#]; name=)
-// CONSTRUCTOR_SUPER_INIT_PAREN_1: End completions
+// CONSTRUCTOR_SUPER_INIT_PAREN_1-NOT: Pattern/
   }
 
   deinit {

@@ -5,12 +5,22 @@
 # built for each variant.
 set(SWIFT_CONFIGURED_SDKS)
 
+include(SwiftWindowsSupport)
+
 # Report the given SDK to the user.
 function(_report_sdk prefix)
   message(STATUS "${SWIFT_SDK_${prefix}_NAME} SDK:")
   if("${prefix}" STREQUAL "WINDOWS")
-    message(STATUS "  INCLUDE: $ENV{INCLUDE}")
-    message(STATUS "  LIB: $ENV{LIB}")
+    message(STATUS "  UCRT Version: $ENV{UCRTVersion}")
+    message(STATUS "  UCRT SDK Dir: $ENV{UniversalCRTSdkDir}")
+    message(STATUS "  VC Dir: $ENV{VCToolsInstallDir}")
+
+    foreach(arch ${SWIFT_SDK_${prefix}_ARCHITECTURES})
+      swift_windows_include_for_arch(${arch} ${arch}_INCLUDE)
+      swift_windows_lib_for_arch(${arch} ${arch}_LIB)
+      message(STATUS "  ${arch} INCLUDE: ${${arch}_INCLUDE}")
+      message(STATUS "  ${arch} LIB: ${${arch}_LIB}")
+    endforeach()
   else()
     message(STATUS "  Path: ${SWIFT_SDK_${prefix}_PATH}")
   endif()
@@ -22,6 +32,13 @@ function(_report_sdk prefix)
   message(STATUS "  Triple name: ${SWIFT_SDK_${prefix}_TRIPLE_NAME}")
   message(STATUS "  Architectures: ${SWIFT_SDK_${prefix}_ARCHITECTURES}")
   message(STATUS "  Object Format: ${SWIFT_SDK_${prefix}_OBJECT_FORMAT}")
+  foreach(arch ${SWIFT_SDK_${prefix}_ARCHITECTURES})
+    if(SWIFT_SDK_${prefix}_ARCH_${arch}_LINKER)
+      message(STATUS "  Linker (${arch}): ${SWIFT_SDK_${prefix}_ARCH_${arch}_LINKER}")
+    else()
+      message(STATUS "  Linker (${arch}): ${CMAKE_LINKER}")
+    endif()
+  endforeach()
 
   foreach(arch ${SWIFT_SDK_${prefix}_ARCHITECTURES})
     message(STATUS
@@ -106,7 +123,7 @@ macro(configure_sdk_darwin
 
   foreach(arch ${architectures})
     set(SWIFT_SDK_${prefix}_ARCH_${arch}_TRIPLE
-        "${arch}-apple-${SWIFT_SDK_${prefix}_TRIPLE_NAME}${SWIFT_SDK_${prefix}_DEPLOYMENT_VERSION}")
+        "${arch}-apple-${SWIFT_SDK_${prefix}_TRIPLE_NAME}")
   endforeach()
 
   # Add this to the list of known SDKs.
@@ -124,7 +141,7 @@ macro(configure_sdk_unix
   set(SWIFT_SDK_${prefix}_PATH "${sdkpath}")
   set(SWIFT_SDK_${prefix}_VERSION "don't use")
   set(SWIFT_SDK_${prefix}_BUILD_NUMBER "don't use")
-  set(SWIFT_SDK_${prefix}_DEPLOYMENT_VERSION "don't use")
+  set(SWIFT_SDK_${prefix}_DEPLOYMENT_VERSION "")
   set(SWIFT_SDK_${prefix}_LIB_SUBDIR "${lib_subdir}")
   set(SWIFT_SDK_${prefix}_VERSION_MIN_NAME "")
   set(SWIFT_SDK_${prefix}_TRIPLE_NAME "${triple_name}")
@@ -154,16 +171,21 @@ macro(configure_sdk_windows prefix sdk_name environment architectures)
   set(SWIFT_SDK_${prefix}_PATH "/")
   set(SWIFT_SDK_${prefix}_VERSION "NOTFOUND")
   set(SWIFT_SDK_${prefix}_BUILD_NUMBER "NOTFOUND")
-  set(SWIFT_SDK_${prefix}_DEPLOYMENT_VERSION "NOTFOUND")
+  set(SWIFT_SDK_${prefix}_DEPLOYMENT_VERSION "")
   set(SWIFT_SDK_${prefix}_LIB_SUBDIR "windows")
   set(SWIFT_SDK_${prefix}_VERSION_MIN_NAME "NOTFOUND")
-  set(SWIFT_SDK_${prefix}_TRIPLE_NAME "NOTFOUND")
+  set(SWIFT_SDK_${prefix}_TRIPLE_NAME "Win32")
   set(SWIFT_SDK_${prefix}_ARCHITECTURES "${architectures}")
   set(SWIFT_SDK_${prefix}_OBJECT_FORMAT "COFF")
 
   foreach(arch ${architectures})
-    set(SWIFT_SDK_${prefix}_ARCH_${arch}_TRIPLE
-        "${arch}-unknown-windows-${environment}")
+    if(arch STREQUAL armv7)
+      set(SWIFT_SDK_${prefix}_ARCH_${arch}_TRIPLE
+          "thumbv7-unknown-windows-${environment}")
+    else()
+      set(SWIFT_SDK_${prefix}_ARCH_${arch}_TRIPLE
+          "${arch}-unknown-windows-${environment}")
+    endif()
   endforeach()
 
   # Add this to the list of known SDKs.

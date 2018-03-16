@@ -2,18 +2,21 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
+import SwiftShims
+
 // Generic functions implementable directly on FloatingPoint.
 @_transparent
-public func fabs<T: FloatingPoint>(_ x: T) -> T {
-  return abs(x)
+public func fabs<T: FloatingPoint>(_ x: T) -> T
+  where T.Magnitude == T {
+  return x.magnitude
 }
 
 @_transparent
@@ -59,9 +62,8 @@ public func trunc<T: FloatingPoint>(_ x: T) -> T {
 %{
 
 # Don't need 64-bit (Double/CDouble) overlays. The ordinary C imports work fine.
-# FIXME: need 80-bit (Float80/long double) versions when long double is imported
-overlayFloatBits = [32] # 80
-allFloatBits = [32, 64] # 80
+overlayFloatBits = [32, 80]
+allFloatBits = [32, 64, 80]
 
 def floatName(bits):
     if bits == 32:
@@ -165,21 +167,33 @@ def TypedBinaryFunctions():
 // Unary functions
 // Note these do not have a corresponding LLVM intrinsic
 % for T, CT, f, ufunc in TypedUnaryFunctions():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @_transparent
 public func ${ufunc}(_ x: ${T}) -> ${T} {
   return ${T}(${ufunc}${f}(${CT}(x)))
 }
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 
-#if os(OSX) || os(iOS) || os(tvOS) || os(watchOS)
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
 // Unary intrinsic functions
 // Note these have a corresponding LLVM intrinsic
 % for T, ufunc in TypedUnaryIntrinsicFunctions():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @_transparent
 public func ${ufunc}(_ x: ${T}) -> ${T} {
   return _${ufunc}(x)
 }
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 #else
@@ -189,11 +203,16 @@ public func ${ufunc}(_ x: ${T}) -> ${T} {
 // UnaryFunctions, we define overlays only for OverlayFloatTypes.
 % for ufunc in UnaryIntrinsicFunctions:
 %     for T, CT, f in OverlayFloatTypes():
+%       if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%       end
 @_transparent
 public func ${ufunc}(_ x: ${T}) -> ${T} {
   return ${T}(${ufunc}${f}(${CT}(x)))
 }
-
+%       if T == 'Float80':
+#endif
+%       end
 %     end
 % end
 #endif
@@ -201,36 +220,37 @@ public func ${ufunc}(_ x: ${T}) -> ${T} {
 // Binary functions
 
 % for T, CT, f, bfunc in TypedBinaryFunctions():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @_transparent
 public func ${bfunc}(_ lhs: ${T}, _ rhs: ${T}) -> ${T} {
   return ${T}(${bfunc}${f}(${CT}(lhs), ${CT}(rhs)))
 }
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 
 // Other functions
 % for T, CT, f in AllFloatTypes():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @available(*, deprecated, message: "use the floatingPointClass property.")
 public func fpclassify(_ value: ${T}) -> Int {
 %if T == 'Double':
-#if os(Linux)
+#if os(Linux) || os(Haiku)
   return Int(__fpclassify(CDouble(value)))
 #elseif os(Windows)
-#if CYGWIN
-  return Int(__fpclassify(CDouble(value)))
-#else
   return Int(_dclass(CDouble(value)))
-#endif
 #else
   return Int(__fpclassifyd(CDouble(value)))
 #endif
 %else:
-#if os(Windows)
-#if CYGWIN
-  return Int(__fpclassify${f}(${CT}(value)))
-#else
+#if os(Windows) 
   return Int(_${f}dclass(${CT}(value)))
-#endif
 #else
   return Int(__fpclassify${f}(${CT}(value)))
 #endif
@@ -252,60 +272,96 @@ public func isnan(_ value: ${T}) -> Bool { return value.isNaN }
 @available(*, unavailable, message: "use the sign property.")
 public func signbit(_ value: ${T}) -> Int { return value.sign.rawValue }
 
+%  if T == 'Float80':
+#endif
+%  end
 % end
 
 % # These are AllFloatTypes not OverlayFloatTypes because of the tuple return.
 % for T, CT, f in AllFloatTypes():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @_transparent
 public func modf(_ value: ${T}) -> (${T}, ${T}) {
   var ipart = ${CT}(0)
   let fpart = modf${f}(${CT}(value), &ipart)
   return (${T}(ipart), ${T}(fpart))
 }
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 
 % # This is AllFloatTypes not OverlayFloatTypes because of the Int parameter.
 % for T, CT, f in AllFloatTypes():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @_transparent
 public func ldexp(_ x: ${T}, _ n: Int) -> ${T} {
   return ${T}(ldexp${f}(${CT}(x), Int32(n)))
 }
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 
 % # This is AllFloatTypes not OverlayFloatTypes because of the tuple return.
 % for T, CT, f in AllFloatTypes():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @_transparent
 public func frexp(_ value: ${T}) -> (${T}, Int) {
   var exp = Int32(0)
   let frac = frexp${f}(${CT}(value), &exp)
   return (${T}(frac), Int(exp))
 }
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 
 % # This is AllFloatTypes not OverlayFloatTypes because of the Int return.
 % for T, CT, f in AllFloatTypes():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @_transparent
 public func ilogb(_ x: ${T}) -> Int {
   return Int(ilogb${f}(${CT}(x)) as Int32)
 }
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 
 % # This is AllFloatTypes not OverlayFloatTypes because of the Int parameter.
 % for T, CT, f in AllFloatTypes():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @_transparent
 public func scalbn(_ x: ${T}, _ n: Int) -> ${T} {
   return ${T}(scalbn${f}(${CT}(x), Int32(n)))
 }
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 
 % # This is AllFloatTypes not OverlayFloatTypes because of the tuple return.
 % for T, CT, f in AllFloatTypes():
-#if os(Linux) || os(FreeBSD) || os(PS4) || os(Android)
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
+#if os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
 @_transparent
 public func lgamma(_ x: ${T}) -> (${T}, Int) {
   var sign = Int32(0)
@@ -313,53 +369,54 @@ public func lgamma(_ x: ${T}) -> (${T}, Int) {
   return (${T}(value), Int(sign))
 }
 #elseif os(Windows)
-#if CYGWIN
-@_transparent
-public func lgamma(_ x: ${T}) -> (${T}, Int) {
-  var sign = Int32(0)
-  let value = lgamma${f}_r(${CT}(x), &sign)
-  return (${T}(value), Int(sign))
-}
-#else
 // TODO(compnerd): implement
-#endif
 #else
-% # On Darwin platform,
-% # The real lgamma_r is not imported because it hides behind macro _REENTRANT.
-@_versioned
-@_silgen_name("_swift_Darwin_lgamma${f}_r")
-func _swift_Darwin_lgamma${f}_r(_: ${CT},
-                                _: UnsafeMutablePointer<Int32>) -> ${CT}
-
-@_transparent
+% # On Darwin platforms the real lgamma_r is not imported
+% # because it hides behind macro _REENTRANT.
+% # This is not @transparent because _stdlib_lgamma() is not public.
 public func lgamma(_ x: ${T}) -> (${T}, Int) {
   var sign = Int32(0)
   let value = withUnsafeMutablePointer(to: &sign) {
     (signp: UnsafeMutablePointer<Int32>) -> ${CT} in
-    return _swift_Darwin_lgamma${f}_r(${CT}(x), signp)
+    return _stdlib_lgamma${f}_r(${CT}(x), signp)
   }
   return (${T}(value), Int(sign))
 }
 #endif
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 
 % # This is AllFloatTypes not OverlayFloatTypes because of the tuple return.
 % for T, CT, f in AllFloatTypes():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @_transparent
 public func remquo(_ x: ${T}, _ y: ${T}) -> (${T}, Int) {
   var quo = Int32(0)
   let rem = remquo${f}(${CT}(x), ${CT}(y), &quo)
   return (${T}(rem), Int(quo))
 }
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 
 % for T, CT, f in OverlayFloatTypes():
+%  if T == 'Float80':
+#if arch(i386) || arch(x86_64)
+%  end
 @_transparent
 public func nan(_ tag: String) -> ${T} {
   return ${T}(nan${f}(tag))
 }
+%  if T == 'Float80':
+#endif
+%  end
 
 % end
 
@@ -367,11 +424,7 @@ public func nan(_ tag: String) -> ${T} {
 @_transparent
 public func jn(_ n: Int, _ x: Double) -> Double {
 #if os(Windows)
-#if CYGWIN
-  return jn(Int32(n), x)
-#else
   return _jn(Int32(n), x)
-#endif
 #else
   return jn(Int32(n), x)
 #endif
@@ -380,11 +433,7 @@ public func jn(_ n: Int, _ x: Double) -> Double {
 @_transparent
 public func yn(_ n: Int, _ x: Double) -> Double {
 #if os(Windows)
-#if CYGWIN
-  return yn(Int32(n), x)
-#else
   return _yn(Int32(n), x)
-#endif
 #else
   return yn(Int32(n), x)
 #endif

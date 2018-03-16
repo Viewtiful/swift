@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -30,6 +30,7 @@ namespace llvm {
 
 namespace swift {
   class AbstractFunctionDecl;
+  class FileUnit;
   class FuncDecl;
   enum class ResilienceExpansion : unsigned;
   struct SILDeclRef;
@@ -40,11 +41,14 @@ namespace swift {
 namespace irgen {
   class Callee;
   class ConstantReference;
+  class ConstantStructBuilder;
   class Explosion;
   class FieldTypeInfo;
+  class FunctionPointer;
   class GenericTypeRequirements;
   class IRGenFunction;
   class IRGenModule;
+  enum RequireMetadata_t : bool;
   class Size;
   class StructLayout;
   enum class SymbolReferenceKind : unsigned char;
@@ -62,14 +66,12 @@ namespace irgen {
   /// metadata?
   bool hasKnownSwiftMetadata(IRGenModule &IGM, CanType theType);
 
-  /// Is the given method known to be callable by vtable dispatch?
-  bool hasKnownVTableEntry(IRGenModule &IGM, AbstractFunctionDecl *theMethod);
-
   /// Emit the body of a lazy cache access function.
   void emitLazyCacheAccessFunction(IRGenModule &IGM,
                                    llvm::Function *accessor,
                                    llvm::GlobalVariable *cacheVariable,
-        const llvm::function_ref<llvm::Value *(IRGenFunction &IGF)> &getValue);
+        const llvm::function_ref<llvm::Value *(IRGenFunction &IGF)> &getValue,
+        bool isReadNone = true);
 
   /// Emit a declaration reference to a metatype object.
   void emitMetatypeRef(IRGenFunction &IGF, CanMetatypeType type,
@@ -126,6 +128,16 @@ namespace irgen {
                                                      CanType type,
                                                      Size &addressPointOffset);
 
+  /// Emit a type context descriptor that was demanded by a reference from
+  /// other generated definitions.
+  void emitLazyTypeContextDescriptor(IRGenModule &IGM,
+                                     NominalTypeDecl *type,
+                                     RequireMetadata_t requireMetadata);
+
+  /// Emit type metadata that was demanded by a reference from other
+  /// generated definitions.
+  void emitLazyTypeMetadata(IRGenModule &IGM, NominalTypeDecl *type);
+
   /// Emit the metadata associated with the given struct declaration.
   void emitStructMetadata(IRGenModule &IGM, StructDecl *theStruct);
 
@@ -137,13 +149,6 @@ namespace irgen {
   int32_t getIndexOfGenericArgument(IRGenModule &IGM,
                                     NominalTypeDecl *decl,
                                     ArchetypeType *archetype);
-  
-  /// Given a reference to nominal type metadata of the given type,
-  /// derive a reference to the parent type metadata.  There must be a
-  /// parent type.
-  llvm::Value *emitParentMetadataRef(IRGenFunction &IGF,
-                                     NominalTypeDecl *theDecl,
-                                     llvm::Value *metadata);
 
   /// Given a reference to nominal type metadata of the given type,
   /// derive a reference to the type metadata stored in the nth
@@ -162,11 +167,6 @@ namespace irgen {
                                            const GenericTypeRequirements &reqts,
                                            unsigned reqtIndex,
                                            llvm::Value *metadata);
-
-  /// Get the offset of a field in the class type metadata.
-  Size getClassFieldOffset(IRGenModule &IGM,
-                           ClassDecl *theClass,
-                           VarDecl *field);
 
   /// Given a reference to class type metadata of the given type,
   /// decide the offset to the given field.  This assumes that the
@@ -207,6 +207,10 @@ namespace irgen {
                                            SILType objectType,
                                            bool suppressCast = false);
 
+  /// Given a non-tagged object pointer, load a pointer to its class object.
+  llvm::Value *emitLoadOfObjCHeapMetadataRef(IRGenFunction &IGF,
+                                             llvm::Value *object);
+
   /// Given a heap-object instance, with some heap-object type, produce a
   /// reference to its heap metadata by dynamically asking the runtime for it.
   llvm::Value *emitHeapMetadataRefForUnknownHeapObject(IRGenFunction &IGF,
@@ -226,14 +230,20 @@ namespace irgen {
                                                 SILType objectType,
                                                 bool suppressCast = false);
 
+  /// Given a metadata pointer, emit the callee for the given method.
+  FunctionPointer emitVirtualMethodValue(IRGenFunction &IGF,
+                                         llvm::Value *metadata,
+                                         SILDeclRef method,
+                                         CanSILFunctionType methodType);
+
   /// Given an instance pointer (or, for a static method, a class
   /// pointer), emit the callee for the given method.
-  llvm::Value *emitVirtualMethodValue(IRGenFunction &IGF,
-                                      llvm::Value *base,
-                                      SILType baseType,
-                                      SILDeclRef method,
-                                      CanSILFunctionType methodType,
-                                      bool useSuperVTable);
+  FunctionPointer emitVirtualMethodValue(IRGenFunction &IGF,
+                                         llvm::Value *base,
+                                         SILType baseType,
+                                         SILDeclRef method,
+                                         CanSILFunctionType methodType,
+                                         bool useSuperVTable);
 
   /// \brief Load a reference to the protocol descriptor for the given protocol.
   ///
@@ -255,7 +265,14 @@ namespace irgen {
                              NominalTypeDecl *type,
                              llvm::Function *fn,
                              ArrayRef<FieldTypeInfo> fieldTypes);
-  
+
+  /// \brief Initialize the field offset vector within the given class or struct
+  /// metadata.
+  void emitInitializeFieldOffsetVector(IRGenFunction &IGF,
+                                       SILType T,
+                                       llvm::Value *metadata,
+                                       bool isVWTMutable);
+
   /// Adjustment indices for the address points of various metadata.
   /// Size is in words.
   namespace MetadataAdjustmentIndex {
@@ -293,9 +310,8 @@ namespace irgen {
   bool isTypeMetadataAccessTrivial(IRGenModule &IGM, CanType type);
 
   /// Determine how the given type metadata should be accessed.
-  MetadataAccessStrategy getTypeMetadataAccessStrategy(IRGenModule &IGM,
-                                                       CanType type);
-  
+  MetadataAccessStrategy getTypeMetadataAccessStrategy(CanType type);
+
   /// Return the address of a function that will return type metadata 
   /// for the given non-dependent type.
   llvm::Function *getOrCreateTypeMetadataAccessFunction(IRGenModule &IGM,
@@ -303,6 +319,29 @@ namespace irgen {
 
   /// Get the runtime identifier for a special protocol, if any.
   SpecialProtocol getSpecialProtocolID(ProtocolDecl *P);
+
+  /// Use the argument as the 'self' type metadata.
+  void getArgAsLocalSelfTypeMetadata(IRGenFunction &IGF, llvm::Value *arg,
+                                     CanType abstractType);
+
+  /// Description of the metadata emitted by adding generic requirements.
+  struct GenericRequirementsMetadata {
+    unsigned NumRequirements = 0;
+    unsigned NumGenericKeyArguments = 0;
+    unsigned NumGenericExtraArguments = 0;
+  };
+
+  /// Add generic requirements to the given constant struct builder.
+  ///
+  /// \param sig The generic signature against which the requirements are
+  /// described.
+  ///
+  /// \param requirements The requirements to add.
+  GenericRequirementsMetadata addGenericRequirements(
+                                          IRGenModule &IGM,
+                                          ConstantStructBuilder &B,
+                                          GenericSignature *sig,
+                                          ArrayRef<Requirement> requirements);
 
 } // end namespace irgen
 } // end namespace swift

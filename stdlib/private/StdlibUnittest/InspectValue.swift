@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -30,11 +30,11 @@ public enum SwiftRuntime {
     case errorObject = 128
   }
 
-  @_silgen_name("swift_StdlibUnittest_getMetadataKindOf")
-  static func _metadataKindImpl<T>(of value: T) -> UInt32
+  @_silgen_name("getMetadataKindOf")
+  private static func _metadataKind<T>(of value: T) -> UInt32
 
   public static func metadataKind<T>(of value: T) -> MetadataKind {
-    return MetadataKind(rawValue: Int(_metadataKindImpl(of: value)))!
+    return MetadataKind(rawValue: Int(_metadataKind(of: value)))!
   }
 }
 

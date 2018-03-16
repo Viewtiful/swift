@@ -1,18 +1,18 @@
-//===--- Ownership.h - Swift ASTs for Reference Ownership -------*- C++ -*-===//
+//===--- Ownership.h - Swift ASTs for Ownership ---------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
-// This file defines common structures for working with the different
-// kinds of reference ownership supported by Swift, such as 'weak' and
-// 'unowned'.
+// This file defines common structures for working with the different kinds of
+// reference ownership supported by Swift, such as 'weak' and 'unowned', as well
+// as the different kinds of value ownership, such as 'inout' and '__shared'.
 //
 //===----------------------------------------------------------------------===//
 
@@ -26,7 +26,7 @@ namespace swift {
 /// Different kinds of reference ownership supported by Swift.
 // This enum is used in diagnostics. If you add a case here, the diagnostics
 // must be updated as well.
-enum class Ownership : uint8_t {
+enum class ReferenceOwnership : uint8_t {
   /// \brief a strong reference (the default semantics)
   Strong,
 
@@ -39,7 +39,20 @@ enum class Ownership : uint8_t {
   /// \brief an 'unowned(unsafe)' reference
   Unmanaged,
 };
-  
+
+/// Different kinds of value ownership supported by Swift.
+enum class ValueOwnership : uint8_t {
+  /// \brief the context-dependent default ownership (sometimes shared,
+  /// sometimes owned)
+  Default,
+  /// \brief an 'inout' mutating pointer-like value
+  InOut,
+  /// \brief a '__shared' non-mutating pointer-like value
+  Shared,
+  /// \brief an '__owned' value
+  Owned
+};
+
 } // end namespace swift
 
 #endif

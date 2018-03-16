@@ -3,6 +3,11 @@
 
 // REQUIRES: objc_interop
 
+// FIXME: rdar://problem/31311598
+// UNSUPPORTED: OS=ios
+// UNSUPPORTED: OS=tvos
+// UNSUPPORTED: OS=watchos
+
 //
 // Tests for the NSString APIs as exposed by String
 //
@@ -18,6 +23,9 @@ import StdlibUnittestFoundationExtras
 class NonContiguousNSString : NSString {
   required init(coder aDecoder: NSCoder) {
     fatalError("don't call this initializer")
+  }
+  required init(itemProviderData data: Data, typeIdentifier: String) throws {
+    fatalError("don't call this initializer")    
   }
 
   override init() { 
@@ -80,10 +88,11 @@ NSStringAPIs.test("NSStringEncoding") {
   enc = .utf32BigEndian
   enc = .ascii
   enc = .utf8
+  expectEqual(.utf8, enc)
 }
 
 NSStringAPIs.test("localizedStringWithFormat(_:...)") {
-  var world: NSString = "world"
+  let world: NSString = "world"
   expectEqual("Hello, world!%42", String.localizedStringWithFormat(
     "Hello, %@!%%%ld", world, 42))
 
@@ -110,7 +119,7 @@ NSStringAPIs.test("init(contentsOfFile:encoding:error:)") {
   }
 
   do {
-    let content = try String(
+    let _ = try String(
       contentsOfFile: nonExistentPath, encoding: .ascii)
     expectUnreachable()
   } catch {
@@ -132,7 +141,7 @@ NSStringAPIs.test("init(contentsOfFile:usedEncoding:error:)") {
     expectUnreachableCatch(error)
   }
 
-  var usedEncoding: String.Encoding = String.Encoding(rawValue: 0)
+  let usedEncoding: String.Encoding = String.Encoding(rawValue: 0)
   do {
     _ = try String(contentsOfFile: nonExistentPath)
     expectUnreachable()
@@ -196,8 +205,8 @@ NSStringAPIs.test("init(cString_:encoding:)") {
 }
 
 NSStringAPIs.test("init(utf8String:)") {
-  var s = "foo あいう"
-  var up = UnsafeMutablePointer<UInt8>.allocate(capacity: 100)
+  let s = "foo あいう"
+  let up = UnsafeMutablePointer<UInt8>.allocate(capacity: 100)
   var i = 0
   for b in s.utf8 {
     up[i] = b
@@ -207,7 +216,7 @@ NSStringAPIs.test("init(utf8String:)") {
   let cstr = UnsafeMutableRawPointer(up)
     .bindMemory(to: CChar.self, capacity: 100)
   expectOptionalEqual(s, String(utf8String: cstr))
-  up.deallocate(capacity: 100)
+  up.deallocate()
 }
 
 NSStringAPIs.test("canBeConvertedToEncoding(_:)") {
@@ -366,13 +375,13 @@ NSStringAPIs.test("compare(_:options:range:locale:)") {
 NSStringAPIs.test("completePath(into:caseSensitive:matchesInto:filterTypes)") {
   let (existingPath, nonExistentPath) = createNSStringTemporaryFile()
   do {
-    var count = nonExistentPath.completePath(caseSensitive: false)
+    let count = nonExistentPath.completePath(caseSensitive: false)
     expectEqual(0, count)
   }
 
   do {
     var outputName = "None Found"
-    var count = nonExistentPath.completePath(
+    let count = nonExistentPath.completePath(
         into: &outputName, caseSensitive: false)
 
     expectEqual(0, count)
@@ -382,7 +391,7 @@ NSStringAPIs.test("completePath(into:caseSensitive:matchesInto:filterTypes)") {
   do {
     var outputName = "None Found"
     var outputArray: [String] = ["foo", "bar"]
-    var count = nonExistentPath.completePath(
+    let count = nonExistentPath.completePath(
         into: &outputName, caseSensitive: false, matchesInto: &outputArray)
 
     expectEqual(0, count)
@@ -391,13 +400,13 @@ NSStringAPIs.test("completePath(into:caseSensitive:matchesInto:filterTypes)") {
   }
 
   do {
-    var count = existingPath.completePath(caseSensitive: false)
+    let count = existingPath.completePath(caseSensitive: false)
     expectEqual(1, count)
   }
 
   do {
     var outputName = "None Found"
-    var count = existingPath.completePath(
+    let count = existingPath.completePath(
         into: &outputName, caseSensitive: false)
 
     expectEqual(1, count)
@@ -407,7 +416,7 @@ NSStringAPIs.test("completePath(into:caseSensitive:matchesInto:filterTypes)") {
   do {
     var outputName = "None Found"
     var outputArray: [String] = ["foo", "bar"]
-    var count = existingPath.completePath(
+    let count = existingPath.completePath(
         into: &outputName, caseSensitive: false, matchesInto: &outputArray)
 
     expectEqual(1, count)
@@ -417,7 +426,7 @@ NSStringAPIs.test("completePath(into:caseSensitive:matchesInto:filterTypes)") {
 
   do {
     var outputName = "None Found"
-    var count = existingPath.completePath(
+    let count = existingPath.completePath(
         into: &outputName, caseSensitive: false, filterTypes: ["txt"])
 
     expectEqual(1, count)
@@ -464,7 +473,7 @@ NSStringAPIs.test("cString(usingEncoding:)") {
   expectNil("абв".cString(using: .ascii))
 
   let expectedBytes: [UInt8] = [ 0xd0, 0xb0, 0xd0, 0xb1, 0xd0, 0xb2, 0 ]
-  var expectedStr: [CChar] = expectedBytes.map { CChar(bitPattern: $0) }
+  let expectedStr: [CChar] = expectedBytes.map { CChar(bitPattern: $0) }
   expectEqual(expectedStr,
       "абв".cString(using: .utf8)!)
 }
@@ -488,8 +497,8 @@ NSStringAPIs.test("init(data:encoding:)") {
   expectNil(String(data: data, encoding: .nonLossyASCII))
   
   expectEqualSequence(
-    "あいう".characters, 
-    String(data: data, encoding: .utf8)!.characters)
+    "あいう", 
+    String(data: data, encoding: .utf8)!)
 }
 
 NSStringAPIs.test("decomposedStringWithCanonicalMapping") {
@@ -530,8 +539,8 @@ NSStringAPIs.test("enumerateLinguisticTagsIn(_:scheme:options:orthography:_:") {
     (tag: String, tokenRange: Range<String.Index>, sentenceRange: Range<String.Index>, stop: inout Bool)
   in
     tags.append(tag)
-    tokens.append(s[tokenRange])
-    sentences.append(s[sentenceRange])
+    tokens.append(String(s[tokenRange]))
+    sentences.append(String(s[sentenceRange]))
     if tags.count == 3 {
       stop = true
     }
@@ -550,14 +559,16 @@ NSStringAPIs.test("enumerateSubstringsIn(_:options:_:)") {
   let endIndex = s.index(s.startIndex, offsetBy: 5)
   do {
     var substrings: [String] = []
+    // FIXME(strings): this API should probably change to accept a Substring?
+    // instead of a String? and a range.
     s.enumerateSubstrings(in: startIndex..<endIndex,
       options: String.EnumerationOptions.byComposedCharacterSequences) {
       (substring: String?, substringRange: Range<String.Index>,
        enclosingRange: Range<String.Index>, stop: inout Bool)
     in
       substrings.append(substring!)
-      expectEqual(substring, s[substringRange])
-      expectEqual(substring, s[enclosingRange])
+      expectEqual(substring, String(s[substringRange]))
+      expectEqual(substring, String(s[enclosingRange]))
     }
     expectEqual(["\u{304b}\u{3099}", "お", "☺️", "😀"], substrings)
   }
@@ -596,7 +607,7 @@ NSStringAPIs.test("getBytes(_:maxLength:usedLength:encoding:options:range:remain
     var buffer = [UInt8](repeating: 0xff, count: bufferLength)
     var usedLength = 0
     var remainingRange = startIndex..<endIndex
-    var result = s.getBytes(&buffer, maxLength: 11, usedLength: &usedLength,
+    let result = s.getBytes(&buffer, maxLength: 11, usedLength: &usedLength,
         encoding: .utf8,
         options: [],
         range: startIndex..<endIndex, remaining: &remainingRange)
@@ -617,7 +628,7 @@ NSStringAPIs.test("getBytes(_:maxLength:usedLength:encoding:options:range:remain
     var buffer = [UInt8](repeating: 0xff, count: bufferLength)
     var usedLength = 0
     var remainingRange = startIndex..<endIndex
-    var result = s.getBytes(&buffer, maxLength: 11, usedLength: &usedLength,
+    let result = s.getBytes(&buffer, maxLength: 11, usedLength: &usedLength,
         encoding: .utf8,
         options: [],
         range: startIndex..<endIndex, remaining: &remainingRange)
@@ -637,7 +648,7 @@ NSStringAPIs.test("getBytes(_:maxLength:usedLength:encoding:options:range:remain
     var buffer = [UInt8](repeating: 0xff, count: bufferLength)
     var usedLength = 0
     var remainingRange = startIndex..<endIndex
-    var result = s.getBytes(&buffer, maxLength: bufferLength,
+    let result = s.getBytes(&buffer, maxLength: bufferLength,
         usedLength: &usedLength, encoding: .utf8,
         options: [],
         range: startIndex..<endIndex, remaining: &remainingRange)
@@ -657,7 +668,7 @@ NSStringAPIs.test("getBytes(_:maxLength:usedLength:encoding:options:range:remain
     var buffer = [UInt8](repeating: 0xff, count: bufferLength)
     var usedLength = 0
     var remainingRange = startIndex..<endIndex
-    var result = s.getBytes(&buffer, maxLength: bufferLength,
+    let result = s.getBytes(&buffer, maxLength: bufferLength,
         usedLength: &usedLength, encoding: .ascii,
         options: [],
         range: startIndex..<endIndex, remaining: &remainingRange)
@@ -670,7 +681,7 @@ NSStringAPIs.test("getBytes(_:maxLength:usedLength:encoding:options:range:remain
 }
 
 NSStringAPIs.test("getCString(_:maxLength:encoding:)") {
-  var s = "abc あかさた"
+  let s = "abc あかさた"
   do {
     // The largest buffer that cannot accommodate the string plus null terminator.
     let bufferLength = 16
@@ -748,8 +759,8 @@ NSStringAPIs.test("getParagraphStart(_:end:contentsEnd:forRange:)") {
 }
 
 NSStringAPIs.test("hash") {
-  var s: String = "abc"
-  var nsstr: NSString = "abc"
+  let s: String = "abc"
+  let nsstr: NSString = "abc"
   expectEqual(nsstr.hash, s.hash)
 }
 
@@ -829,7 +840,7 @@ NSStringAPIs.test("init(format:arguments:)") {
 }
 
 NSStringAPIs.test("init(format:locale:_:...)") {
-  var world: NSString = "world"
+  let world: NSString = "world"
   expectEqual("Hello, world!%42", String(format: "Hello, %@!%%%ld",
       locale: nil, world, 42))
 }
@@ -865,7 +876,7 @@ NSStringAPIs.test("linguisticTagsIn(_:scheme:options:orthography:tokenRanges:)")
   let startIndex = s.index(s.startIndex, offsetBy: 5)
   let endIndex = s.index(s.startIndex, offsetBy: 17)
   var tokenRanges: [Range<String.Index>] = []
-  var tags = s.linguisticTags(in: startIndex..<endIndex,
+  let tags = s.linguisticTags(in: startIndex..<endIndex,
       scheme: NSLinguisticTagSchemeTokenType,
       options: [],
       orthography: nil, tokenRanges: &tokenRanges)
@@ -873,7 +884,7 @@ NSStringAPIs.test("linguisticTagsIn(_:scheme:options:orthography:tokenRanges:)")
     [NSLinguisticTagWord, NSLinguisticTagWhitespace, NSLinguisticTagWord],
     tags)
   expectEqual(["Глокая", " ", "куздра"],
-      tokenRanges.map { s[$0] } )
+      tokenRanges.map { String(s[$0]) } )
 }
 
 NSStringAPIs.test("localizedCaseInsensitiveCompare(_:)") {
@@ -1134,9 +1145,11 @@ NSStringAPIs.test("rangeOfComposedCharacterSequences(for:)") {
       for: s.index(s.startIndex, offsetBy: 8)..<s.index(s.startIndex, offsetBy: 10))])
 }
 
-func toIntRange(
-  _ string: String, _ maybeRange: Range<String.Index>?
-) -> Range<Int>? {
+func toIntRange<
+  S : StringProtocol
+>(
+  _ string: S, _ maybeRange: Range<String.Index>?
+) -> Range<Int>? where S.Index == String.Index {
   guard let range = maybeRange else { return nil }
 
   return
@@ -1316,7 +1329,7 @@ NSStringAPIs.test("smallestEncoding") {
 }
 
 func getHomeDir() -> String {
-#if os(OSX)
+#if os(macOS)
   return String(cString: getpwuid(getuid()).pointee.pw_dir)
 #elseif os(iOS) || os(tvOS) || os(watchOS)
   // getpwuid() returns null in sandboxed apps under iOS simulator.
@@ -1326,13 +1339,13 @@ func getHomeDir() -> String {
 #endif
 }
 
-NSStringAPIs.test("addingPercentEscapes(using:)") {
-  expectNil(
-    "abcd абвг".addingPercentEscapes(
-      using: .ascii))
-  expectOptionalEqual("abcd%20%D0%B0%D0%B1%D0%B2%D0%B3",
-    "abcd абвг".addingPercentEscapes(
-      using: .utf8))
+NSStringAPIs.test("addingPercentEncoding(withAllowedCharacters:)") {
+  expectOptionalEqual(
+    "abcd1234",
+    "abcd1234".addingPercentEncoding(withAllowedCharacters: .alphanumerics))
+  expectOptionalEqual(
+    "abcd%20%D0%B0%D0%B1%D0%B2%D0%B3",
+    "abcd абвг".addingPercentEncoding(withAllowedCharacters: .alphanumerics))
 }
 
 NSStringAPIs.test("appendingFormat(_:_:...)") {
@@ -1396,21 +1409,6 @@ NSStringAPIs.test("padding(toLength:withPad:startingAtIndex:)") {
     "abc абв \u{0001F60A}YZXYZ",
     "abc абв \u{0001F60A}".padding(
       toLength: 15, withPad: "XYZ", startingAt: 1))
-}
-
-NSStringAPIs.test("removingPercentEncoding/OSX 10.9")
-  .xfail(.osxMinor(10, 9, reason: "looks like a bug in Foundation in OS X 10.9"))
-  .xfail(.iOSMajor(7, reason: "same bug in Foundation in iOS 7.*"))
-  .skip(.iOSSimulatorAny("same bug in Foundation in iOS Simulator 7.*"))
-  .code {
-  expectOptionalEqual("", "".removingPercentEncoding)
-}
-
-NSStringAPIs.test("removingPercentEncoding") {
-  expectNil("%".removingPercentEncoding)
-  expectOptionalEqual(
-    "abcd абвг",
-    "ab%63d %D0%B0%D0%B1%D0%B2%D0%B3".removingPercentEncoding)
 }
 
 NSStringAPIs.test("replacingCharacters(in:with:)") {
@@ -1539,39 +1537,38 @@ NSStringAPIs.test("replacingOccurrences(of:with:options:range:)") {
       range: s.index(s.startIndex, offsetBy: 1)..<s.index(s.startIndex, offsetBy: 3)))
 }
 
-NSStringAPIs.test("replacingPercentEscapes(using:)") {
+NSStringAPIs.test("removingPercentEncoding") {
   expectOptionalEqual(
     "abcd абвг",
-    "abcd абвг".replacingPercentEscapes(
-      using: .ascii))
+    "abcd абвг".removingPercentEncoding)
 
   expectOptionalEqual(
     "abcd абвг\u{0000}\u{0001}",
-    "abcd абвг%00%01".replacingPercentEscapes(
-      using: .ascii))
+    "abcd абвг%00%01".removingPercentEncoding)
 
   expectOptionalEqual(
     "abcd абвг",
-    "%61%62%63%64%20%D0%B0%D0%B1%D0%B2%D0%B3"
-      .replacingPercentEscapes(using: .utf8))
+    "%61%62%63%64%20%D0%B0%D0%B1%D0%B2%D0%B3".removingPercentEncoding)
 
-  expectNil("%ED%B0".replacingPercentEscapes(
-    using: .utf8))
+  expectOptionalEqual(
+    "abcd абвг",
+    "ab%63d %D0%B0%D0%B1%D0%B2%D0%B3".removingPercentEncoding)
 
-  expectNil("%zz".replacingPercentEscapes(
-    using: .utf8))
+  expectNil("%ED%B0".removingPercentEncoding)
+
+  expectNil("%zz".removingPercentEncoding)
+
+  expectNil("abcd%FF".removingPercentEncoding)
+
+  expectNil("%".removingPercentEncoding)
 }
 
-NSStringAPIs.test("replacingPercentEscapes(using:)/rdar18029471")
-  .xfail(
-    .custom({ true },
-    reason: "<rdar://problem/18029471> NSString " +
-      "replacingPercentEscapesUsingEncoding: does not return nil " +
-      "when a byte sequence is not legal in ASCII"))
+NSStringAPIs.test("removingPercentEncoding/OSX 10.9")
+  .xfail(.osxMinor(10, 9, reason: "looks like a bug in Foundation in OS X 10.9"))
+  .xfail(.iOSMajor(7, reason: "same bug in Foundation in iOS 7.*"))
+  .skip(.iOSSimulatorAny("same bug in Foundation in iOS Simulator 7.*"))
   .code {
-  expectNil(
-    "abcd%FF".replacingPercentEscapes(
-      using: .ascii))
+  expectOptionalEqual("", "".removingPercentEncoding)
 }
 
 NSStringAPIs.test("trimmingCharacters(in:)") {
@@ -1841,4 +1838,3 @@ NSStringAPIs.test("copy construction") {
 }
 
 runAllTests()
-

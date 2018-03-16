@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 protocol P {}
 
@@ -46,7 +46,7 @@ class Dryer : WashingMachine {}
 class HairDryer {}
 
 let a: Toaster.Type.Protocol = Toaster.Type.self
-let b: Any.Type.Type = Toaster.Type.self
+let b: Any.Type.Type = Toaster.Type.self // expected-error {{cannot convert value of type 'Toaster.Type.Protocol' to specified type 'Any.Type.Type'}}
 let c: Any.Type.Protocol = Toaster.Type.self // expected-error {{cannot convert value of type 'Toaster.Type.Protocol' to specified type 'Any.Type.Protocol'}}
 let d: Toaster.Type.Type = WashingMachine.Type.self
 let e: Any.Type.Type = WashingMachine.Type.self
@@ -84,4 +84,11 @@ class Something {
 
 func testP3(_ p: P3, something: Something) {
   p.withP3(Something.takeP3(something))
+}
+
+func testIUOToAny(_ t: AnyObject.Type!) {
+  let _: Any = t // expected-warning {{expression implicitly coerced from 'AnyObject.Type?' to 'Any'}}
+  // expected-note@-1 {{force-unwrap the value to avoid this warning}}
+  // expected-note@-2 {{provide a default value to avoid this warning}}
+  // expected-note@-3 {{explicitly cast to 'Any' with 'as Any' to silence this warning}}
 }

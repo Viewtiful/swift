@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -17,10 +17,10 @@
 
 #include "TypeChecker.h"
 #include "DerivedConformances.h"
-#include "swift/AST/ArchetypeBuilder.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/Stmt.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/Module.h"
 #include "swift/AST/Types.h"
 
 using namespace swift;
@@ -70,23 +70,19 @@ static ValueDecl *deriveBridgedNSError_enum_nsErrorDomain(TypeChecker &tc,
   
   auto stringTy = C.getStringDecl()->getDeclaredType();
 
-  // Define the getter.
-  auto getterDecl = declareDerivedPropertyGetter(tc, parentDecl, enumDecl,
-                                                 stringTy, stringTy,
-                                                 /*isStatic=*/true,
-                                                 /*isFinal=*/true);
-  getterDecl->setBodySynthesizer(&deriveBodyBridgedNSError_enum_nsErrorDomain);
-  
   // Define the property.
   VarDecl *propDecl;
   PatternBindingDecl *pbDecl;
   std::tie(propDecl, pbDecl)
-    = declareDerivedReadOnlyProperty(tc, parentDecl, enumDecl,
-                                     C.Id_nsErrorDomain,
-                                     stringTy, stringTy,
-                                     getterDecl, /*isStatic=*/true,
-                                     /*isFinal=*/true);
-  
+    = declareDerivedProperty(tc, parentDecl, enumDecl, C.Id_nsErrorDomain,
+                             stringTy, stringTy, /*isStatic=*/true,
+                             /*isFinal=*/true);
+
+  // Define the getter.
+  auto getterDecl =
+    addGetterToReadOnlyDerivedProperty(tc, propDecl, stringTy);
+  getterDecl->setBodySynthesizer(&deriveBodyBridgedNSError_enum_nsErrorDomain);
+
   auto dc = cast<IterableDeclContext>(parentDecl);
   dc->addMember(getterDecl);
   dc->addMember(propDecl);
@@ -104,7 +100,7 @@ ValueDecl *DerivedConformance::deriveBridgedNSError(TypeChecker &tc,
 
   auto enumType = cast<EnumDecl>(type);
 
-  if (requirement->getName() == tc.Context.Id_nsErrorDomain)
+  if (requirement->getBaseName() == tc.Context.Id_nsErrorDomain)
     return deriveBridgedNSError_enum_nsErrorDomain(tc, parentDecl, enumType);
 
   tc.diagnose(requirement->getLoc(),

@@ -2,17 +2,17 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/Serialization/ModuleFile.h"
 #include "SILFormat.h"
 #include "swift/SIL/SILModule.h"
+#include "swift/Serialization/ModuleFile.h"
 #include "swift/Serialization/SerializedSILLoader.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -52,6 +52,9 @@ namespace swift {
     std::unique_ptr<SerializedFuncTable> DefaultWitnessTableList;
     std::vector<ModuleFile::PartiallySerialized<SILDefaultWitnessTable *>>
     DefaultWitnessTables;
+
+    std::vector<ModuleFile::PartiallySerialized<SILProperty *>>
+    Properties;
 
     /// A declaration will only
     llvm::DenseMap<NormalProtocolConformance *, SILWitnessTable *>
@@ -104,10 +107,14 @@ namespace swift {
     SILGlobalVariable *readGlobalVar(StringRef Name);
     SILWitnessTable *readWitnessTable(serialization::DeclID,
                                       SILWitnessTable *existingWt);
+    SILProperty *readProperty(serialization::DeclID);
     SILDefaultWitnessTable *
     readDefaultWitnessTable(serialization::DeclID,
                             SILDefaultWitnessTable *existingWt);
 
+    KeyPathPatternComponent
+    readKeyPathComponent(ArrayRef<uint64_t> ListOfValues, unsigned &nextValue);
+    
 public:
     Identifier getModuleIdentifier() const {
       return MF->getAssociatedModule()->getName();
@@ -118,7 +125,7 @@ public:
     SILFunction *lookupSILFunction(SILFunction *InFunc);
     SILFunction *lookupSILFunction(StringRef Name,
                                    bool declarationOnly = false);
-    bool hasSILFunction(StringRef Name, SILLinkage Linkage);
+    bool hasSILFunction(StringRef Name, Optional<SILLinkage> Linkage = None);
     SILVTable *lookupVTable(Identifier Name);
     SILWitnessTable *lookupWitnessTable(SILWitnessTable *wt);
     SILDefaultWitnessTable *
@@ -141,13 +148,19 @@ public:
         Callback = nullptr;
 
       getAllSILFunctions();
+      getAllSILGlobalVariables();
       getAllVTables();
       getAllWitnessTables();
       getAllDefaultWitnessTables();
+      getAllProperties();
     }
 
     /// Deserialize all SILFunctions inside the module and add them to SILMod.
     void getAllSILFunctions();
+
+    /// Deserialize all SILGlobalVariables inside the module and add them to
+    /// SILMod.
+    void getAllSILGlobalVariables();
 
     /// Deserialize all VTables inside the module and add them to SILMod.
     void getAllVTables();
@@ -159,6 +172,10 @@ public:
     /// to SILMod.
     void getAllDefaultWitnessTables();
 
+    /// Deserialize all Property descriptors inside the module and add them
+    /// to SILMod.
+    void getAllProperties();
+    
     SILDeserializer(ModuleFile *MF, SILModule &M,
                     SerializedSILLoader::Callback *callback);
 

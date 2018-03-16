@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 protocol P { }
 @objc protocol OP { }
@@ -53,7 +53,7 @@ class GP<T : P> {}
 class GOP<T : OP> {}
 class GCP<T : CP> {}
 class GSP<T : SP> {}
-class GAO<T : AnyObject> {}
+class GAO<T : AnyObject> {} // expected-note 2{{requirement specified as 'T' : 'AnyObject'}}
 
 func blackHole(_ t: Any) {}
 
@@ -61,9 +61,9 @@ func testBindExistential() {
   blackHole(GP<P>()) // expected-error{{using 'P' as a concrete type conforming to protocol 'P' is not supported}}
   blackHole(GOP<OP>())
   blackHole(GCP<CP>()) // expected-error{{using 'CP' as a concrete type conforming to protocol 'CP' is not supported}}
-  blackHole(GAO<P>()) // expected-error{{type 'P' does not conform to protocol 'AnyObject'}}
+  blackHole(GAO<P>()) // expected-error{{'GAO' requires that 'P' be a class type}}
   blackHole(GAO<OP>())
-  blackHole(GAO<CP>()) // expected-error{{using 'CP' as a concrete type conforming to protocol 'AnyObject' is not supported}}
+  blackHole(GAO<CP>()) // expected-error{{'GAO' requires that 'CP' be a class type}}
   blackHole(GSP<SP>()) // expected-error{{'SP' cannot be used as a type conforming to protocol 'SP' because 'SP' has static requirements}}
   blackHole(GAO<AnyObject>())
 }
@@ -73,7 +73,7 @@ protocol Mine {}
 class M1: Mine {}
 class M2: Mine {}
 extension Collection where Iterator.Element : Mine {
-    final func takeAll() {}
+    func takeAll() {}
 }
 
 func foo() {

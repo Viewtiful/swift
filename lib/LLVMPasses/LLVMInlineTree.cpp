@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -27,7 +27,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Format.h"
 #include "llvm/ADT/SmallSet.h"
-#include "swift/Basic/DemangleWrappers.h"
+#include "swift/Demangling/Demangle.h"
 #include "swift/Basic/Range.h"
 
 using namespace llvm;
@@ -117,7 +117,7 @@ class InlineTree {
     bool isTopLevel = false;
 
     const NodeList &getChildren() {
-      if (SortedChildren.size() == 0 && UnsortedChildren.size() > 0)
+      if (SortedChildren.empty() && !UnsortedChildren.empty())
         sortNodes(UnsortedChildren, SortedChildren);
       return SortedChildren;
     }
@@ -274,7 +274,7 @@ void InlineTree::printNode(Node *Nd, int indent, raw_ostream &os) {
 void InlineTree::build(Module *M) {
   // Build the trees for all top-level functions.
   for (Function &F : *M) {
-    if (F.size() == 0)
+    if (F.empty())
       continue;
     buildTree(&F);
   }

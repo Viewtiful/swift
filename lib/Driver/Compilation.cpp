@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2018 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,8 +14,9 @@
 
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsDriver.h"
-#include "swift/Basic/Fallthrough.h"
 #include "swift/Basic/Program.h"
+#include "swift/Basic/STLExtras.h"
+#include "swift/Basic/Statistic.h"
 #include "swift/Basic/TaskQueue.h"
 #include "swift/Basic/Version.h"
 #include "swift/Basic/type_traits.h"
@@ -24,12 +25,16 @@
 #include "swift/Driver/Driver.h"
 #include "swift/Driver/Job.h"
 #include "swift/Driver/ParseableOutput.h"
+#include "swift/Driver/ToolChain.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
+#include "llvm/Support/Chrono.h"
+#include "llvm/Support/Compiler.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
@@ -38,40 +43,118 @@
 
 #include "CompilationRecord.h"
 
+// Batch-mode has a sub-mode for testing that randomizes batch partitions,
+// by user-provided seed. That is the only thing randomized here.
+#include <random>
+
 using namespace swift;
 using namespace swift::sys;
 using namespace swift::driver;
 using namespace llvm::opt;
 
-Compilation::Compilation(DiagnosticEngine &Diags, OutputLevel Level,
+struct LogJob {
+  const Job *j;
+  LogJob(const Job *j) : j(j) {}
+};
+
+struct LogJobArray {
+  const ArrayRef<const Job *> js;
+  LogJobArray(const ArrayRef<const Job *> js) : js(js) {}
+};
+
+struct LogJobSet {
+  const SmallPtrSetImpl<const Job*> &js;
+  LogJobSet(const SmallPtrSetImpl<const Job*> &js) : js(js) {}
+};
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const LogJob &lj) {
+  lj.j->printSummary(os);
+  return os;
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const LogJobArray &ljs) {
+  os << "[";
+  interleave(ljs.js,
+             [&](Job const *j) { os << LogJob(j); },
+             [&]() { os << ' '; });
+  os << "]";
+  return os;
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const LogJobSet &ljs) {
+  os << "{";
+  interleave(ljs.js,
+             [&](Job const *j) { os << LogJob(j); },
+             [&]() { os << ' '; });
+  os << "}";
+  return os;
+}
+
+
+Compilation::Compilation(DiagnosticEngine &Diags,
+                         const ToolChain &TC,
+                         OutputInfo const &OI,
+                         OutputLevel Level,
                          std::unique_ptr<InputArgList> InputArgs,
                          std::unique_ptr<DerivedArgList> TranslatedArgs,
                          InputFileList InputsWithTypes,
-                         StringRef ArgsHash, llvm::sys::TimeValue StartTime,
+                         StringRef ArgsHash, llvm::sys::TimePoint<> StartTime,
                          unsigned NumberOfParallelCommands,
                          bool EnableIncrementalBuild,
+                         bool EnableBatchMode,
+                         unsigned BatchSeed,
                          bool SkipTaskExecution,
                          bool SaveTemps,
-                         bool ShowDriverTimeCompilation)
-  : Diags(Diags), Level(Level), RawInputArgs(std::move(InputArgs)),
-    TranslatedArgs(std::move(TranslatedArgs)), 
+                         bool ShowDriverTimeCompilation,
+                         std::unique_ptr<UnifiedStatsReporter> StatsReporter)
+  : Diags(Diags), TheToolChain(TC),
+    TheOutputInfo(OI),
+    Level(Level),
+    RawInputArgs(std::move(InputArgs)),
+    TranslatedArgs(std::move(TranslatedArgs)),
     InputFilesWithTypes(std::move(InputsWithTypes)), ArgsHash(ArgsHash),
     BuildStartTime(StartTime),
     NumberOfParallelCommands(NumberOfParallelCommands),
     SkipTaskExecution(SkipTaskExecution),
     EnableIncrementalBuild(EnableIncrementalBuild),
+    EnableBatchMode(EnableBatchMode),
+    BatchSeed(BatchSeed),
     SaveTemps(SaveTemps),
-    ShowDriverTimeCompilation(ShowDriverTimeCompilation) {
+    ShowDriverTimeCompilation(ShowDriverTimeCompilation),
+    Stats(std::move(StatsReporter)) {
 };
 
-using CommandSet = llvm::SmallPtrSet<const Job *, 16>;
+static bool writeFilelistIfNecessary(const Job *job, DiagnosticEngine &diags);
 
-namespace {
-  struct PerformJobsState {
+using CommandSet = llvm::SmallPtrSet<const Job *, 16>;
+using CommandSetVector = llvm::SetVector<const Job*>;
+using BatchPartition = std::vector<std::vector<const Job*>>;
+
+using InputInfoMap = llvm::SmallMapVector<const llvm::opt::Arg *,
+                                          CompileJobAction::InputInfo, 16>;
+
+namespace swift {
+namespace driver {
+  class PerformJobsState {
+
+    /// The containing Compilation object.
+    Compilation &Comp;
+
     /// All jobs which have been scheduled for execution (whether or not
     /// they've finished execution), or which have been determined that they
     /// don't need to run.
     CommandSet ScheduledCommands;
+
+    /// A temporary buffer to hold commands that were scheduled but haven't been
+    /// added to the Task Queue yet, because we might try batching them together
+    /// first.
+    CommandSetVector PendingExecution;
+
+    /// Set of synthetic BatchJobs that serve to cluster subsets of jobs waiting
+    /// in PendingExecution. Also used to identify (then unpack) BatchJobs back
+    /// to their underlying non-Batch Jobs, when running a callback from
+    /// TaskQueue.
+    CommandSet BatchJobs;
 
     /// All jobs which have finished execution or which have been determined
     /// that they don't need to run.
@@ -88,8 +171,838 @@ namespace {
     ///
     /// Only intended for source files.
     llvm::SmallDenseMap<const Job *, bool, 16> UnfinishedCommands;
+
+    /// Jobs that incremental-mode has decided it can skip.
+    CommandSet DeferredCommands;
+
+    /// Jobs in the initial set with Condition::Always, or lacking existing
+    /// .swiftdeps files.
+    SmallVector<const Job *, 16> InitialOutOfDateCommands;
+
+    /// Dependency graph for deciding which jobs are dirty (need running)
+    /// or clean (can be skipped).
+    using DependencyGraph = DependencyGraph<const Job *>;
+    DependencyGraph DepGraph;
+
+    /// Helper for tracing the propagation of marks in the graph.
+    DependencyGraph::MarkTracer ActualIncrementalTracer;
+    DependencyGraph::MarkTracer *IncrementalTracer = nullptr;
+
+    /// TaskQueue for execution.
+    std::unique_ptr<TaskQueue> TQ;
+
+    /// Cumulative result of PerformJobs(), accumulated from subprocesses.
+    int Result = EXIT_SUCCESS;
+
+    /// True if any Job crashed.
+    bool AnyAbnormalExit = false;
+
+    /// Timers for monitoring execution time of subprocesses.
+    llvm::TimerGroup DriverTimerGroup {"driver", "Driver Compilation Time"};
+    llvm::SmallDenseMap<const Job *, std::unique_ptr<llvm::Timer>, 16>
+    DriverTimers;
+
+    void noteBuilding(const Job *cmd, StringRef reason) {
+      if (!Comp.ShowIncrementalBuildDecisions)
+        return;
+      if (ScheduledCommands.count(cmd))
+        return;
+      llvm::outs() << "Queuing " << reason << ": " << LogJob(cmd) << "\n";
+      IncrementalTracer->printPath(
+        llvm::outs(), cmd, [](raw_ostream &out, const Job *base) {
+          out << llvm::sys::path::filename(base->getOutput().getBaseInput(0));
+        });
+    }
+
+    const Job *findUnfinishedJob(ArrayRef<const Job *> JL) {
+      for (const Job *Cmd : JL) {
+        if (!FinishedCommands.count(Cmd))
+          return Cmd;
+      }
+      return nullptr;
+    }
+
+    /// Schedule the given Job if it has not been scheduled and if all of
+    /// its inputs are in FinishedCommands.
+    void scheduleCommandIfNecessaryAndPossible(const Job *Cmd) {
+      if (ScheduledCommands.count(Cmd)) {
+        if (Comp.ShowJobLifecycle) {
+          llvm::outs() << "Already scheduled: " << LogJob(Cmd) << "\n";
+        }
+        return;
+      }
+
+      if (auto Blocking = findUnfinishedJob(Cmd->getInputs())) {
+        BlockingCommands[Blocking].push_back(Cmd);
+        if (Comp.ShowJobLifecycle) {
+          llvm::outs() << "Blocked by: " << LogJob(Blocking)
+                       << ", now blocking jobs: "
+                       << LogJobArray(BlockingCommands[Blocking]) << "\n";
+        }
+        return;
+      }
+
+      // Adding to scheduled means we've committed to its completion (not
+      // distinguished from skipping). We never remove it once inserted.
+      ScheduledCommands.insert(Cmd);
+
+      // Adding to pending means it should be in the next round of additions to
+      // the task queue (either batched or singularly); we remove Jobs from
+      // PendingExecution once we hand them over to the TaskQueue.
+      PendingExecution.insert(Cmd);
+    }
+
+    void addPendingJobToTaskQueue(const Job *Cmd) {
+      // FIXME: Failing here should not take down the whole process.
+      bool success = writeFilelistIfNecessary(Cmd, Comp.Diags);
+      assert(success && "failed to write filelist");
+      (void)success;
+
+      assert(Cmd->getExtraEnvironment().empty() &&
+             "not implemented for compilations with multiple jobs");
+      if (Comp.ShowJobLifecycle)
+        llvm::outs() << "Added to TaskQueue: " << LogJob(Cmd) << "\n";
+      TQ->addTask(Cmd->getExecutable(), Cmd->getArguments(), llvm::None,
+                  (void *)Cmd);
+    }
+
+    /// When a task finishes, check other Jobs that may be blocked.
+    void markFinished(const Job *Cmd, bool Skipped=false) {
+      if (Comp.ShowJobLifecycle) {
+        llvm::outs() << "Job "
+                     << (Skipped ? "skipped" : "finished")
+                     << ": " << LogJob(Cmd) << "\n";
+      }
+      FinishedCommands.insert(Cmd);
+      if (Comp.Stats) {
+          auto &D = Comp.Stats->getDriverCounters();
+          if (Skipped)
+            D.NumDriverJobsSkipped++;
+          else
+            D.NumDriverJobsRun++;
+      }
+      auto BlockedIter = BlockingCommands.find(Cmd);
+      if (BlockedIter != BlockingCommands.end()) {
+        auto AllBlocked = std::move(BlockedIter->second);
+        if (Comp.ShowJobLifecycle) {
+          llvm::outs() << "Scheduling maybe-unblocked jobs: "
+                       << LogJobArray(AllBlocked) << "\n";
+        }
+        BlockingCommands.erase(BlockedIter);
+        for (auto *Blocked : AllBlocked)
+          scheduleCommandIfNecessaryAndPossible(Blocked);
+      }
+    }
+
+    /// Callback which will be called immediately after a task has started. This
+    /// callback may be used to provide output indicating that the task began.
+    void taskBegan(ProcessId Pid, void *Context) {
+      // TODO: properly handle task began.
+      const Job *BeganCmd = (const Job *)Context;
+
+      if (Comp.ShowDriverTimeCompilation) {
+        llvm::SmallString<128> TimerName;
+        llvm::raw_svector_ostream OS(TimerName);
+        OS << LogJob(BeganCmd);
+        DriverTimers.insert({
+            BeganCmd,
+              std::unique_ptr<llvm::Timer>(
+                new llvm::Timer("task", OS.str(), DriverTimerGroup))
+              });
+        DriverTimers[BeganCmd]->startTimer();
+      }
+
+      switch (Comp.Level) {
+      case OutputLevel::Normal:
+        break;
+        // For command line or verbose output, print out each command as it
+        // begins execution.
+      case OutputLevel::PrintJobs:
+        BeganCmd->printCommandLineAndEnvironment(llvm::outs());
+        break;
+      case OutputLevel::Verbose:
+        BeganCmd->printCommandLine(llvm::errs());
+        break;
+      case OutputLevel::Parseable:
+        parseable_output::emitBeganMessage(llvm::errs(), *BeganCmd, Pid);
+        break;
+      }
+    }
+
+    /// Note that a .swiftdeps file failed to load and take corrective actions:
+    /// disable incremental logic and schedule all existing deferred commands.
+    void
+    dependencyLoadFailed(StringRef DependenciesFile, bool Warn=true) {
+      if (Warn && Comp.ShowIncrementalBuildDecisions)
+        Comp.Diags.diagnose(SourceLoc(),
+                            diag::warn_unable_to_load_dependencies,
+                            DependenciesFile);
+      Comp.disableIncrementalBuild();
+      for (const Job *Cmd : DeferredCommands)
+        scheduleCommandIfNecessaryAndPossible(Cmd);
+      DeferredCommands.clear();
+    }
+
+    /// Helper that attmepts to reload a job's .swiftdeps file after the job
+    /// exits, and re-run transitive marking to ensure everything is properly
+    /// invalidated by any new dependency edges introduced by it. If reloading
+    /// fails, this can cause deferred jobs to be immediately scheduled.
+    template <unsigned N>
+    void reloadAndRemarkDeps(const Job *FinishedCmd,
+                             int ReturnCode,
+                             SmallVector<const Job *, N> &Dependents) {
+      const CommandOutput &Output = FinishedCmd->getOutput();
+      StringRef DependenciesFile =
+        Output.getAdditionalOutputForType(types::TY_SwiftDeps);
+
+      if (DependenciesFile.empty()) {
+        // If this job doesn't track dependencies, it must always be run.
+        // Note: In theory CheckDependencies makes sense as well (for a leaf
+        // node in the dependency graph), and maybe even NewlyAdded (for very
+        // coarse dependencies that always affect downstream nodes), but we're
+        // not using either of those right now, and this logic should probably
+        // be revisited when we are.
+        assert(FinishedCmd->getCondition() == Job::Condition::Always);
+      } else {
+        // If we have a dependency file /and/ the frontend task exited normally,
+        // we can be discerning about what downstream files to rebuild.
+        if (ReturnCode == EXIT_SUCCESS || ReturnCode == EXIT_FAILURE) {
+          bool wasCascading = DepGraph.isMarked(FinishedCmd);
+
+          switch (DepGraph.loadFromPath(FinishedCmd, DependenciesFile)) {
+          case DependencyGraphImpl::LoadResult::HadError:
+            if (ReturnCode == EXIT_SUCCESS) {
+              dependencyLoadFailed(DependenciesFile);
+              Dependents.clear();
+            } // else, let the next build handle it.
+            break;
+          case DependencyGraphImpl::LoadResult::UpToDate:
+            if (!wasCascading)
+              break;
+            LLVM_FALLTHROUGH;
+          case DependencyGraphImpl::LoadResult::AffectsDownstream:
+            DepGraph.markTransitive(Dependents, FinishedCmd,
+                                    IncrementalTracer);
+            break;
+          }
+        } else {
+          // If there's an abnormal exit (a crash), assume the worst.
+          switch (FinishedCmd->getCondition()) {
+          case Job::Condition::NewlyAdded:
+            // The job won't be treated as newly added next time. Conservatively
+            // mark it as affecting other jobs, because some of them may have
+            // completed already.
+            DepGraph.markTransitive(Dependents, FinishedCmd,
+                                    IncrementalTracer);
+            break;
+          case Job::Condition::Always:
+            // Any incremental task that shows up here has already been marked;
+            // we didn't need to wait for it to finish to start downstream
+            // tasks.
+            assert(DepGraph.isMarked(FinishedCmd));
+            break;
+          case Job::Condition::RunWithoutCascading:
+            // If this file changed, it might have been a non-cascading change
+            // and it might not. Unfortunately, the interface hash has been
+            // updated or compromised, so we don't actually know anymore; we
+            // have to conservatively assume the changes could affect other
+            // files.
+            DepGraph.markTransitive(Dependents, FinishedCmd,
+                                    IncrementalTracer);
+            break;
+          case Job::Condition::CheckDependencies:
+            // If the only reason we're running this is because something else
+            // changed, then we can trust the dependency graph as to whether
+            // it's a cascading or non-cascading change. That is, if whatever
+            // /caused/ the error isn't supposed to affect other files, and
+            // whatever /fixes/ the error isn't supposed to affect other files,
+            // then there's no need to recompile any other inputs. If either of
+            // those are false, we /do/ need to recompile other inputs.
+            break;
+          }
+        }
+      }
+    }
+
+    /// Unpack a \c BatchJob that has finished into its constituent \c Job
+    /// members, and call \c taskFinished on each, propagating any \c
+    /// TaskFinishedResponse other than \c
+    /// TaskFinishedResponse::ContinueExecution from any of the constituent
+    /// calls.
+    TaskFinishedResponse
+    unpackAndFinishBatch(int ReturnCode, StringRef Output,
+                         StringRef Errors, const BatchJob *B) {
+      if (Comp.ShowJobLifecycle)
+        llvm::outs() << "Batch job finished: " << LogJob(B) << "\n";
+      auto res = TaskFinishedResponse::ContinueExecution;
+      for (const Job *J : B->getCombinedJobs()) {
+        if (Comp.ShowJobLifecycle)
+          llvm::outs() << "  ==> Unpacked batch constituent finished: "
+                       << LogJob(J) << "\n";
+        auto r = taskFinished(llvm::sys::ProcessInfo::InvalidPid, ReturnCode, Output,
+                              Errors, (void *)J);
+        if (r != TaskFinishedResponse::ContinueExecution)
+          res = r;
+      }
+      return res;
+    }
+
+    /// Callback which will be called immediately after a task has finished
+    /// execution. Determines if execution should continue, and also schedule
+    /// any additional Jobs which we now know we need to run.
+    TaskFinishedResponse
+    taskFinished(ProcessId Pid, int ReturnCode, StringRef Output,
+                 StringRef Errors, void *Context) {
+      const Job *FinishedCmd = (const Job *)Context;
+
+      if (Pid != llvm::sys::ProcessInfo::InvalidPid) {
+
+        if (Comp.ShowDriverTimeCompilation) {
+          DriverTimers[FinishedCmd]->stopTimer();
+        }
+
+        switch (Comp.Level) {
+        case OutputLevel::PrintJobs:
+          // Only print the jobs, not the outputs
+          break;
+        case OutputLevel::Normal:
+        case OutputLevel::Verbose:
+          // Send the buffered output to stderr, though only if we
+          // support getting buffered output.
+          if (TaskQueue::supportsBufferingOutput())
+            llvm::errs() << Output;
+          break;
+        case OutputLevel::Parseable:
+          // Parseable output was requested.
+          parseable_output::emitFinishedMessage(llvm::errs(), *FinishedCmd, Pid,
+                                                ReturnCode, Output);
+          break;
+        }
+      }
+
+      if (BatchJobs.count(FinishedCmd) != 0) {
+        return unpackAndFinishBatch(ReturnCode, Output, Errors,
+                                    static_cast<const BatchJob *>(FinishedCmd));
+      }
+
+      // In order to handle both old dependencies that have disappeared and new
+      // dependencies that have arisen, we need to reload the dependency file.
+      // Do this whether or not the build succeeded.
+      SmallVector<const Job *, 16> Dependents;
+      if (Comp.getIncrementalBuildEnabled()) {
+        reloadAndRemarkDeps(FinishedCmd, ReturnCode, Dependents);
+      }
+
+      if (ReturnCode != EXIT_SUCCESS) {
+        // The task failed, so return true without performing any further
+        // dependency analysis.
+
+        // Store this task's ReturnCode as our Result if we haven't stored
+        // anything yet.
+        if (Result == EXIT_SUCCESS)
+          Result = ReturnCode;
+
+        if (!isa<CompileJobAction>(FinishedCmd->getSource()) ||
+            ReturnCode != EXIT_FAILURE) {
+          Comp.Diags.diagnose(SourceLoc(), diag::error_command_failed,
+                              FinishedCmd->getSource().getClassName(),
+                              ReturnCode);
+        }
+
+        return Comp.ContinueBuildingAfterErrors ?
+          TaskFinishedResponse::ContinueExecution :
+          TaskFinishedResponse::StopExecution;
+      }
+
+      // When a task finishes, we need to reevaluate the other commands that
+      // might have been blocked.
+      markFinished(FinishedCmd);
+
+      for (const Job *Cmd : Dependents) {
+        DeferredCommands.erase(Cmd);
+        noteBuilding(Cmd, "because of dependencies discovered later");
+        scheduleCommandIfNecessaryAndPossible(Cmd);
+      }
+
+      return TaskFinishedResponse::ContinueExecution;
+    }
+
+    TaskFinishedResponse
+    taskSignalled(ProcessId Pid, StringRef ErrorMsg, StringRef Output,
+                  StringRef Errors, void *Context, Optional<int> Signal) {
+      const Job *SignalledCmd = (const Job *)Context;
+
+      if (Comp.ShowDriverTimeCompilation) {
+        DriverTimers[SignalledCmd]->stopTimer();
+      }
+
+      if (Comp.Level == OutputLevel::Parseable) {
+        // Parseable output was requested.
+        parseable_output::emitSignalledMessage(llvm::errs(), *SignalledCmd,
+                                               Pid, ErrorMsg, Output, Signal);
+      } else {
+        // Otherwise, send the buffered output to stderr, though only if we
+        // support getting buffered output.
+        if (TaskQueue::supportsBufferingOutput())
+          llvm::errs() << Output;
+      }
+      if (!ErrorMsg.empty())
+        Comp.Diags.diagnose(SourceLoc(), diag::error_unable_to_execute_command,
+                            ErrorMsg);
+
+      if (Signal.hasValue()) {
+        Comp.Diags.diagnose(SourceLoc(), diag::error_command_signalled,
+                            SignalledCmd->getSource().getClassName(),
+                            Signal.getValue());
+      } else {
+        Comp.Diags.diagnose(SourceLoc(),
+                            diag::error_command_signalled_without_signal_number,
+                            SignalledCmd->getSource().getClassName());
+      }
+
+      // Since the task signalled, unconditionally set result to -2.
+      Result = -2;
+      AnyAbnormalExit = true;
+
+      return TaskFinishedResponse::StopExecution;
+    }
+
+  public:
+    PerformJobsState(Compilation &Comp)
+      : Comp(Comp),
+        ActualIncrementalTracer(Comp.Stats.get()) {
+      if (Comp.SkipTaskExecution)
+        TQ.reset(new DummyTaskQueue(Comp.NumberOfParallelCommands));
+      else
+        TQ.reset(new TaskQueue(Comp.NumberOfParallelCommands));
+      if (Comp.ShowIncrementalBuildDecisions || Comp.Stats)
+        IncrementalTracer = &ActualIncrementalTracer;
+    }
+
+    /// Schedule all jobs we can from the initial list provided by Compilation.
+    void scheduleInitialJobs() {
+      for (const Job *Cmd : Comp.getJobs()) {
+        if (!Comp.getIncrementalBuildEnabled()) {
+          scheduleCommandIfNecessaryAndPossible(Cmd);
+          continue;
+        }
+
+        // Try to load the dependencies file for this job. If there isn't one, we
+        // always have to run the job, but it doesn't affect any other jobs. If
+        // there should be one but it's not present or can't be loaded, we have to
+        // run all the jobs.
+        // FIXME: We can probably do better here!
+        Job::Condition Condition = Job::Condition::Always;
+        StringRef DependenciesFile =
+          Cmd->getOutput().getAdditionalOutputForType(types::TY_SwiftDeps);
+        if (!DependenciesFile.empty()) {
+          if (Cmd->getCondition() == Job::Condition::NewlyAdded) {
+            DepGraph.addIndependentNode(Cmd);
+          } else {
+            switch (DepGraph.loadFromPath(Cmd, DependenciesFile)) {
+            case DependencyGraphImpl::LoadResult::HadError:
+              dependencyLoadFailed(DependenciesFile, /*Warn=*/false);
+              break;
+            case DependencyGraphImpl::LoadResult::UpToDate:
+              Condition = Cmd->getCondition();
+              break;
+            case DependencyGraphImpl::LoadResult::AffectsDownstream:
+              llvm_unreachable("we haven't marked anything in this graph yet");
+            }
+          }
+        }
+
+        switch (Condition) {
+        case Job::Condition::Always:
+          if (Comp.getIncrementalBuildEnabled() && !DependenciesFile.empty()) {
+            InitialOutOfDateCommands.push_back(Cmd);
+            DepGraph.markIntransitive(Cmd);
+          }
+          LLVM_FALLTHROUGH;
+        case Job::Condition::RunWithoutCascading:
+          noteBuilding(Cmd, "(initial)");
+          scheduleCommandIfNecessaryAndPossible(Cmd);
+          break;
+        case Job::Condition::CheckDependencies:
+          DeferredCommands.insert(Cmd);
+          break;
+        case Job::Condition::NewlyAdded:
+          llvm_unreachable("handled above");
+        }
+      }
+    }
+
+    /// Schedule transitive closure of initial jobs, and external jobs.
+    void scheduleAdditionalJobs() {
+      if (Comp.getIncrementalBuildEnabled()) {
+        SmallVector<const Job *, 16> AdditionalOutOfDateCommands;
+
+        // We scheduled all of the files that have actually changed. Now add the
+        // files that haven't changed, so that they'll get built in parallel if
+        // possible and after the first set of files if it's not.
+        for (auto *Cmd : InitialOutOfDateCommands) {
+          DepGraph.markTransitive(AdditionalOutOfDateCommands, Cmd,
+                                  IncrementalTracer);
+        }
+
+        for (auto *transitiveCmd : AdditionalOutOfDateCommands)
+          noteBuilding(transitiveCmd, "because of the initial set");
+        size_t firstSize = AdditionalOutOfDateCommands.size();
+
+        // Check all cross-module dependencies as well.
+        for (StringRef dependency : DepGraph.getExternalDependencies()) {
+          llvm::sys::fs::file_status depStatus;
+          if (!llvm::sys::fs::status(dependency, depStatus))
+            if (depStatus.getLastModificationTime() < Comp.LastBuildTime)
+              continue;
+
+          // If the dependency has been modified since the oldest built file,
+          // or if we can't stat it for some reason (perhaps it's been deleted?),
+          // trigger rebuilds through the dependency graph.
+          DepGraph.markExternal(AdditionalOutOfDateCommands, dependency);
+        }
+
+        for (auto *externalCmd :
+               llvm::makeArrayRef(AdditionalOutOfDateCommands).slice(firstSize)) {
+          noteBuilding(externalCmd, "because of external dependencies");
+        }
+
+        for (auto *AdditionalCmd : AdditionalOutOfDateCommands) {
+          if (!DeferredCommands.count(AdditionalCmd))
+            continue;
+          scheduleCommandIfNecessaryAndPossible(AdditionalCmd);
+          DeferredCommands.erase(AdditionalCmd);
+        }
+      }
+    }
+
+    /// Insert all jobs in \p Cmds (of descriptive name \p Kind) to the \c
+    /// TaskQueue, and clear \p Cmds.
+    template <typename Container>
+    void transferJobsToTaskQueue(Container &Cmds, StringRef Kind) {
+      for (const Job *Cmd : Cmds) {
+        if (Comp.ShowJobLifecycle)
+          llvm::outs() << "Adding " << Kind
+                       << " job to task queue: "
+                       << LogJob(Cmd) << "\n";
+        addPendingJobToTaskQueue(Cmd);
+      }
+      Cmds.clear();
+    }
+
+    /// Partition the jobs in \c PendingExecution into those that are \p
+    /// Batchable and those that are \p NonBatchable, clearing \p
+    /// PendingExecution.
+    void getPendingBatchableJobs(CommandSetVector &Batchable,
+                                 CommandSetVector &NonBatchable) {
+      for (const Job *Cmd : PendingExecution) {
+        if (Comp.getToolChain().jobIsBatchable(Comp, Cmd)) {
+          if (Comp.ShowJobLifecycle)
+            llvm::outs() << "Batchable: " << LogJob(Cmd) << "\n";
+          Batchable.insert(Cmd);
+        } else {
+          if (Comp.ShowJobLifecycle)
+            llvm::outs() << "Not batchable: " << LogJob(Cmd) << "\n";
+          NonBatchable.insert(Cmd);
+        }
+      }
+    }
+
+    /// If \p Batch is nonempty, construct a new \c BatchJob from its
+    /// contents by calling \p ToolChain::constructBatchJob, then insert the
+    /// new \c BatchJob into \p Batches.
+    void
+    formBatchJobFromPartitionBatch(std::vector<const Job *> &Batches,
+                                   std::vector<const Job *> const &Batch) {
+      if (Batch.empty())
+        return;
+      if (Comp.ShowJobLifecycle)
+        llvm::outs() << "Forming batch job from "
+                     << Batch.size() << " constituents\n";
+      auto const &TC = Comp.getToolChain();
+      auto J = TC.constructBatchJob(Batch, Comp);
+      if (J)
+        Batches.push_back(Comp.addJob(std::move(J)));
+    }
+
+    /// Build a vector of partition indices, one per Job: the i'th index says
+    /// which batch of the partition the i'th Job will be assigned to. If we are
+    /// shuffling due to -driver-batch-seed, the returned indices will not be
+    /// arranged in contiguous runs. We shuffle partition-indices here, not
+    /// elements themselves, to preserve the invariant that each batch is a
+    /// subsequence of the full set of inputs, not just a subset.
+    std::vector<size_t>
+    assignJobsToPartitions(size_t PartitionSize,
+                           size_t NumJobs) {
+      size_t Remainder = NumJobs % PartitionSize;
+      size_t TargetSize = NumJobs / PartitionSize;
+      std::vector<size_t> PartitionIndex;
+      PartitionIndex.reserve(NumJobs);
+      for (size_t P = 0; P < PartitionSize; ++P) {
+        // Spread remainder evenly across partitions by adding 1 to the target
+        // size of the first Remainder of them.
+        size_t FillCount = TargetSize + ((P < Remainder) ? 1 : 0);
+        std::fill_n(std::back_inserter(PartitionIndex), FillCount, P);
+      }
+      if (Comp.BatchSeed != 0) {
+        std::minstd_rand gen(Comp.BatchSeed);
+        std::shuffle(PartitionIndex.begin(), PartitionIndex.end(), gen);
+      }
+      assert(PartitionIndex.size() == NumJobs);
+      return PartitionIndex;
+    }
+
+    /// Create \c NumberOfParallelCommands batches and assign each job to a
+    /// batch either filling each partition in order or, if seeded with a
+    /// nonzero value, pseudo-randomly (but determinstically and nearly-evenly).
+    void partitionIntoBatches(std::vector<const Job *> Batchable,
+                              BatchPartition &Partition) {
+      if (Comp.ShowJobLifecycle) {
+        llvm::outs() << "Found " << Batchable.size() << " batchable jobs\n";
+        llvm::outs() << "Forming into " << Partition.size() << " batches\n";
+      }
+
+      assert(!Partition.empty());
+      auto PartitionIndex = assignJobsToPartitions(Partition.size(),
+                                                   Batchable.size());
+      assert(PartitionIndex.size() == Batchable.size());
+      auto const &TC = Comp.getToolChain();
+      for_each(Batchable, PartitionIndex, [&](const Job *Cmd, size_t Idx) {
+          assert(Idx < Partition.size());
+          std::vector<const Job*> &P = Partition[Idx];
+          if (P.empty() || TC.jobsAreBatchCombinable(Comp, P[0], Cmd)) {
+            if (Comp.ShowJobLifecycle)
+              llvm::outs() << "Adding " << LogJob(Cmd)
+                           << " to batch " << Idx << '\n';
+            P.push_back(Cmd);
+          } else {
+            // Strange but theoretically possible that we have a batchable job
+            // that's not combinable with others; tack a new batch on for it.
+            if (Comp.ShowJobLifecycle)
+              llvm::outs() << "Adding " << LogJob(Cmd)
+                           << " to new batch " << Partition.size() << '\n';
+            Partition.push_back(std::vector<const Job*>());
+            Partition.back().push_back(Cmd);
+          }
+        });
+    }
+
+    // FIXME: at the moment we're not passing OutputFileMaps to frontends, so
+    // due to the multiplication of the number of additional files and the
+    // number of files in a batch, it's pretty easy to construct too-long
+    // command lines here, which will then fail to exec. We address this crudely
+    // by re-forming batches with a finer partition when we overflow.
+    bool shouldRetryWithMorePartitions(std::vector<const Job *> const &Batches,
+                                       size_t &NumPartitions) {
+
+      // Stop rebatching if we can't subdivide batches any further.
+      if (NumPartitions > PendingExecution.size())
+        return false;
+
+      for (auto const *B : Batches) {
+        if (!llvm::sys::commandLineFitsWithinSystemLimits(B->getExecutable(),
+                                                          B->getArguments())) {
+          // To avoid redoing the batch loop too many times, repartition pretty
+          // aggressively by doubling partition count / halving size.
+          NumPartitions *= 2;
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /// Select jobs that are batch-combinable from \c PendingExecution, combine
+    /// them together into \p BatchJob instances (also inserted into \p
+    /// BatchJobs), and enqueue all \c PendingExecution jobs (whether batched or
+    /// not) into the \c TaskQueue for execution.
+    void formBatchJobsAndAddPendingJobsToTaskQueue() {
+
+      // If batch mode is not enabled, just transfer the set of pending jobs to
+      // the task queue, as-is.
+      if (!Comp.getBatchModeEnabled()) {
+        transferJobsToTaskQueue(PendingExecution, "standard");
+        return;
+      }
+
+      size_t NumPartitions = Comp.NumberOfParallelCommands;
+      CommandSetVector Batchable, NonBatchable;
+      std::vector<const Job *> Batches;
+      do {
+        // We might be restarting loop; clear these before proceeding.
+        Batchable.clear();
+        NonBatchable.clear();
+        Batches.clear();
+
+        // Split the batchable from non-batchable pending jobs.
+        getPendingBatchableJobs(Batchable, NonBatchable);
+
+        // Partition the batchable jobs into sets.
+        BatchPartition Partition(NumPartitions);
+        partitionIntoBatches(Batchable.takeVector(), Partition);
+
+        // Construct a BatchJob from each batch in the partition.
+        for (auto const &Batch : Partition) {
+          formBatchJobFromPartitionBatch(Batches, Batch);
+        }
+
+      } while (shouldRetryWithMorePartitions(Batches, NumPartitions));
+      PendingExecution.clear();
+
+      // Save batches so we can locate and decompose them on task-exit.
+      for (const Job *Cmd : Batches)
+        BatchJobs.insert(Cmd);
+
+      // Enqueue the resulting jobs, batched and non-batched alike.
+      transferJobsToTaskQueue(Batches, "batch");
+      transferJobsToTaskQueue(NonBatchable, "non-batch");
+    }
+
+    void runTaskQueueToCompletion() {
+      do {
+        using namespace std::placeholders;
+        // Ask the TaskQueue to execute.
+        if (TQ->execute(std::bind(&PerformJobsState::taskBegan, this,
+                                  _1, _2),
+                        std::bind(&PerformJobsState::taskFinished, this,
+                                  _1, _2, _3, _4, _5),
+                        std::bind(&PerformJobsState::taskSignalled, this,
+                                  _1, _2, _3, _4, _5, _6))) {
+          if (Result == EXIT_SUCCESS) {
+            // FIXME: Error from task queue while Result == EXIT_SUCCESS most
+            // likely means some fork/exec or posix_spawn failed; TaskQueue saw
+            // "an error" at some stage before even calling us with a process
+            // exit / signal (or else a poll failed); unfortunately the task
+            // causing it was dropped on the floor and we have no way to recover
+            // it here, so we report a very poor, generic error.
+            Comp.Diags.diagnose(SourceLoc(), diag::error_unable_to_execute_command,
+                                "<unknown>");
+            Result = -2;
+            AnyAbnormalExit = true;
+            return;
+          }
+        }
+
+        // Returning without error from TaskQueue::execute should mean either an
+        // empty TaskQueue or a failed subprocess.
+        assert(!(Result == 0 && TQ->hasRemainingTasks()));
+
+        // Task-exit callbacks from TaskQueue::execute may have unblocked jobs,
+        // which means there might be PendingExecution jobs to enqueue here. If
+        // there are, we need to continue trying to make progress on the
+        // TaskQueue before we start marking deferred jobs as skipped, below.
+        if (!PendingExecution.empty() && Result == 0) {
+          formBatchJobsAndAddPendingJobsToTaskQueue();
+          continue;
+        }
+
+        // If we got here, all the queued and pending work we know about is
+        // done; mark anything still in deferred state as skipped.
+        for (const Job *Cmd : DeferredCommands) {
+          if (Comp.Level == OutputLevel::Parseable) {
+            // Provide output indicating this command was skipped if parseable
+            // output was requested.
+            parseable_output::emitSkippedMessage(llvm::errs(), *Cmd);
+          }
+          ScheduledCommands.insert(Cmd);
+          markFinished(Cmd, /*Skipped=*/true);
+        }
+        DeferredCommands.clear();
+
+        // It's possible that by marking some jobs as skipped, we unblocked
+        // some jobs and thus have entries in PendingExecution again; push
+        // those through to the TaskQueue.
+        formBatchJobsAndAddPendingJobsToTaskQueue();
+
+        // If we added jobs to the TaskQueue, and we are not in an error state,
+        // we want to give the TaskQueue another run.
+      } while (Result == 0 && TQ->hasRemainingTasks());
+    }
+
+    void checkUnfinishedJobs() {
+      if (Result == 0) {
+        assert(BlockingCommands.empty() &&
+               "some blocking commands never finished properly");
+      } else {
+        // Make sure we record any files that still need to be rebuilt.
+        for (const Job *Cmd : Comp.getJobs()) {
+          // Skip files that don't use dependency analysis.
+          StringRef DependenciesFile =
+            Cmd->getOutput().getAdditionalOutputForType(types::TY_SwiftDeps);
+          if (DependenciesFile.empty())
+            continue;
+
+          // Don't worry about commands that finished or weren't going to run.
+          if (FinishedCommands.count(Cmd))
+            continue;
+          if (!ScheduledCommands.count(Cmd))
+            continue;
+
+          bool isCascading = true;
+          if (Comp.getIncrementalBuildEnabled())
+            isCascading = DepGraph.isMarked(Cmd);
+          UnfinishedCommands.insert({Cmd, isCascading});
+        }
+      }
+    }
+
+    void populateInputInfoMap(InputInfoMap &inputs) const {
+      for (auto &entry : UnfinishedCommands) {
+        for (auto *action : entry.first->getSource().getInputs()) {
+          auto inputFile = dyn_cast<InputAction>(action);
+          if (!inputFile)
+            continue;
+
+          CompileJobAction::InputInfo info;
+          info.previousModTime = entry.first->getInputModTime();
+          info.status = entry.second ?
+            CompileJobAction::InputInfo::NeedsCascadingBuild :
+            CompileJobAction::InputInfo::NeedsNonCascadingBuild;
+          inputs[&inputFile->getInputArg()] = info;
+        }
+      }
+
+      for (const Job *entry : FinishedCommands) {
+        const auto *compileAction = dyn_cast<CompileJobAction>(&entry->getSource());
+        if (!compileAction)
+          continue;
+
+        for (auto *action : compileAction->getInputs()) {
+          auto inputFile = dyn_cast<InputAction>(action);
+          if (!inputFile)
+            continue;
+
+          CompileJobAction::InputInfo info;
+          info.previousModTime = entry->getInputModTime();
+          info.status = CompileJobAction::InputInfo::UpToDate;
+          inputs[&inputFile->getInputArg()] = info;
+        }
+      }
+
+      // Sort the entries by input order.
+      static_assert(IsTriviallyCopyable<CompileJobAction::InputInfo>::value,
+                    "llvm::array_pod_sort relies on trivially-copyable data");
+      using InputInfoEntry = std::decay<decltype(inputs.front())>::type;
+      llvm::array_pod_sort(inputs.begin(), inputs.end(),
+                           [](const InputInfoEntry *lhs,
+                              const InputInfoEntry *rhs) -> int {
+                             auto lhsIndex = lhs->first->getIndex();
+                             auto rhsIndex = rhs->first->getIndex();
+                             return (lhsIndex < rhsIndex) ? -1 : (lhsIndex > rhsIndex) ? 1 : 0;
+                           });
+    }
+
+    int getResult() {
+      if (Result == 0)
+        Result = Comp.Diags.hadAnyError();
+      return Result;
+    }
+
+    bool hadAnyAbnormalExit() {
+      return AnyAbnormalExit;
+    }
   };
-}
+} // namespace driver
+} // namespace swift
 
 Compilation::~Compilation() = default;
 
@@ -99,66 +1012,11 @@ Job *Compilation::addJob(std::unique_ptr<Job> J) {
   return result;
 }
 
-static const Job *findUnfinishedJob(ArrayRef<const Job *> JL,
-                                    const CommandSet &FinishedCommands) {
-  for (const Job *Cmd : JL) {
-    if (!FinishedCommands.count(Cmd))
-      return Cmd;
-  }
-  return nullptr;
-}
-
-using InputInfoMap =
-  llvm::SmallMapVector<const llvm::opt::Arg *, CompileJobAction::InputInfo, 16>;
-
-static void populateInputInfoMap(InputInfoMap &inputs,
-                                 const PerformJobsState &endState) {
-  for (auto &entry : endState.UnfinishedCommands) {
-    for (auto *action : entry.first->getSource().getInputs()) {
-      auto inputFile = cast<InputAction>(action);
-
-      CompileJobAction::InputInfo info;
-      info.previousModTime = entry.first->getInputModTime();
-      info.status = entry.second ?
-          CompileJobAction::InputInfo::NeedsCascadingBuild :
-          CompileJobAction::InputInfo::NeedsNonCascadingBuild;
-      inputs[&inputFile->getInputArg()] = info;
-    }
-  }
-
-  for (const Job *entry : endState.FinishedCommands) {
-    const auto *compileAction = dyn_cast<CompileJobAction>(&entry->getSource());
-    if (!compileAction)
-      continue;
-
-    for (auto *action : compileAction->getInputs()) {
-      auto inputFile = cast<InputAction>(action);
-
-      CompileJobAction::InputInfo info;
-      info.previousModTime = entry->getInputModTime();
-      info.status = CompileJobAction::InputInfo::UpToDate;
-      inputs[&inputFile->getInputArg()] = info;
-    }
-  }
-
-  // Sort the entries by input order.
-  static_assert(IsTriviallyCopyable<CompileJobAction::InputInfo>::value,
-                "llvm::array_pod_sort relies on trivially-copyable data");
-  using InputInfoEntry = std::decay<decltype(inputs.front())>::type;
-  llvm::array_pod_sort(inputs.begin(), inputs.end(),
-                       [](const InputInfoEntry *lhs,
-                          const InputInfoEntry *rhs) -> int {
-    auto lhsIndex = lhs->first->getIndex();
-    auto rhsIndex = rhs->first->getIndex();
-    return (lhsIndex < rhsIndex) ? -1 : (lhsIndex > rhsIndex) ? 1 : 0;
-  });
-}
-
 static void checkForOutOfDateInputs(DiagnosticEngine &diags,
                                     const InputInfoMap &inputs) {
   for (const auto &inputPair : inputs) {
     auto recordedModTime = inputPair.second.previousModTime;
-    if (recordedModTime == llvm::sys::TimeValue::MaxTime())
+    if (recordedModTime == llvm::sys::TimePoint<>::max())
       continue;
 
     const char *input = inputPair.first->getValue();
@@ -178,8 +1036,13 @@ static void checkForOutOfDateInputs(DiagnosticEngine &diags,
 }
 
 static void writeCompilationRecord(StringRef path, StringRef argsHash,
-                                   llvm::sys::TimeValue buildTime,
+                                   llvm::sys::TimePoint<> buildTime,
                                    const InputInfoMap &inputs) {
+  // Before writing to the dependencies file path, preserve any previous file
+  // that may have been there. No error handling -- this is just a nicety, it
+  // doesn't matter if it fails.
+  llvm::sys::fs::rename(path, path + "~");
+
   std::error_code error;
   llvm::raw_fd_ostream out(path, error, llvm::sys::fs::F_None);
   if (out.has_error()) {
@@ -188,8 +1051,13 @@ static void writeCompilationRecord(StringRef path, StringRef argsHash,
     return;
   }
 
-  auto writeTimeValue = [](llvm::raw_ostream &out, llvm::sys::TimeValue time) {
-    out << "[" << time.seconds() << ", " << time.nanoseconds() << "]";
+  auto writeTimeValue = [](llvm::raw_ostream &out,
+                           llvm::sys::TimePoint<> time) {
+    using namespace std::chrono;
+    auto secs = time_point_cast<seconds>(time);
+    time -= secs.time_since_epoch(); // remainder in nanoseconds
+    out << "[" << secs.time_since_epoch().count()
+        << ", " << time.time_since_epoch().count() << "]";
   };
 
   using compilation_record::TopLevelKey;
@@ -222,478 +1090,72 @@ static void writeCompilationRecord(StringRef path, StringRef argsHash,
 }
 
 static bool writeFilelistIfNecessary(const Job *job, DiagnosticEngine &diags) {
-  FilelistInfo filelistInfo = job->getFilelistInfo();
-  if (filelistInfo.path.empty())
-    return true;
+  bool ok = true;
+  for (const FilelistInfo &filelistInfo : job->getFilelistInfos()) {
+    if (filelistInfo.path.empty())
+      return true;
 
-  std::error_code error;
-  llvm::raw_fd_ostream out(filelistInfo.path, error, llvm::sys::fs::F_None);
-  if (out.has_error()) {
-    out.clear_error();
-    diags.diagnose(SourceLoc(), diag::error_unable_to_make_temporary_file,
-                   error.message());
-    return false;
-  }
-
-  if (filelistInfo.whichFiles == FilelistInfo::Input) {
-    // FIXME: Duplicated from ToolChains.cpp.
-    for (const Job *input : job->getInputs()) {
-      const CommandOutput &outputInfo = input->getOutput();
-      if (outputInfo.getPrimaryOutputType() == filelistInfo.type) {
-        for (auto &output : outputInfo.getPrimaryOutputFilenames())
-          out << output << "\n";
-      } else {
-        auto &output = outputInfo.getAnyOutputForType(filelistInfo.type);
-        if (!output.empty())
-          out << output << "\n";
-      }
-    }
-  } else {
-    const CommandOutput &outputInfo = job->getOutput();
-    assert(outputInfo.getPrimaryOutputType() == filelistInfo.type);
-    for (auto &output : outputInfo.getPrimaryOutputFilenames())
-      out << output << "\n";
-  }
-
-  return true;
-}
-
-int Compilation::performJobsImpl() {
-  // Create a TaskQueue for execution.
-  std::unique_ptr<TaskQueue> TQ;
-  if (SkipTaskExecution)
-    TQ.reset(new DummyTaskQueue(NumberOfParallelCommands));
-  else
-    TQ.reset(new TaskQueue(NumberOfParallelCommands));
-
-  PerformJobsState State;
-
-  using DependencyGraph = DependencyGraph<const Job *>;
-  DependencyGraph DepGraph;
-  SmallPtrSet<const Job *, 16> DeferredCommands;
-  SmallVector<const Job *, 16> InitialOutOfDateCommands;
-
-  DependencyGraph::MarkTracer ActualIncrementalTracer;
-  DependencyGraph::MarkTracer *IncrementalTracer = nullptr;
-  if (ShowIncrementalBuildDecisions)
-    IncrementalTracer = &ActualIncrementalTracer;
-
-  auto noteBuilding = [&] (const Job *cmd, StringRef reason) {
-    if (!ShowIncrementalBuildDecisions)
-      return;
-    if (State.ScheduledCommands.count(cmd))
-      return;
-    llvm::outs() << "Queuing "
-                 << llvm::sys::path::filename(cmd->getOutput().getBaseInput(0))
-                 << " " << reason << "\n";
-    IncrementalTracer->printPath(llvm::outs(), cmd,
-                                 [](raw_ostream &out, const Job *base) {
-      out << llvm::sys::path::filename(base->getOutput().getBaseInput(0));
-    });
-  };
-
-  // Set up scheduleCommandIfNecessaryAndPossible.
-  // This will only schedule the given command if it has not been scheduled
-  // and if all of its inputs are in FinishedCommands.
-  auto scheduleCommandIfNecessaryAndPossible = [&] (const Job *Cmd) {
-    if (State.ScheduledCommands.count(Cmd))
-      return;
-
-    if (auto Blocking = findUnfinishedJob(Cmd->getInputs(),
-                                          State.FinishedCommands)) {
-      State.BlockingCommands[Blocking].push_back(Cmd);
-      return;
-    }
-
-    // FIXME: Failing here should not take down the whole process.
-    bool success = writeFilelistIfNecessary(Cmd, Diags);
-    assert(success && "failed to write filelist");
-    (void)success;
-
-    assert(Cmd->getExtraEnvironment().empty() &&
-           "not implemented for compilations with multiple jobs");
-    State.ScheduledCommands.insert(Cmd);
-    TQ->addTask(Cmd->getExecutable(), Cmd->getArguments(), llvm::None,
-                (void *)Cmd);
-  };
-
-  // When a task finishes, we need to reevaluate the other commands that
-  // might have been blocked.
-  auto markFinished = [&] (const Job *Cmd) {
-    State.FinishedCommands.insert(Cmd);
-
-    auto BlockedIter = State.BlockingCommands.find(Cmd);
-    if (BlockedIter != State.BlockingCommands.end()) {
-      auto AllBlocked = std::move(BlockedIter->second);
-      State.BlockingCommands.erase(BlockedIter);
-      for (auto *Blocked : AllBlocked)
-        scheduleCommandIfNecessaryAndPossible(Blocked);
-    }
-  };
-
-  // Schedule all jobs we can.
-  for (const Job *Cmd : getJobs()) {
-    if (!getIncrementalBuildEnabled()) {
-      scheduleCommandIfNecessaryAndPossible(Cmd);
+    std::error_code error;
+    llvm::raw_fd_ostream out(filelistInfo.path, error, llvm::sys::fs::F_None);
+    if (out.has_error()) {
+      out.clear_error();
+      diags.diagnose(SourceLoc(), diag::error_unable_to_make_temporary_file,
+                     error.message());
+      ok = false;
       continue;
     }
 
-    // Try to load the dependencies file for this job. If there isn't one, we
-    // always have to run the job, but it doesn't affect any other jobs. If
-    // there should be one but it's not present or can't be loaded, we have to
-    // run all the jobs.
-    // FIXME: We can probably do better here!
-    Job::Condition Condition = Job::Condition::Always;
-    StringRef DependenciesFile =
-      Cmd->getOutput().getAdditionalOutputForType(types::TY_SwiftDeps);
-    if (!DependenciesFile.empty()) {
-      if (Cmd->getCondition() == Job::Condition::NewlyAdded) {
-        DepGraph.addIndependentNode(Cmd);
-      } else {
-        switch (DepGraph.loadFromPath(Cmd, DependenciesFile)) {
-        case DependencyGraphImpl::LoadResult::HadError:
-          disableIncrementalBuild();
-          for (const Job *Cmd : DeferredCommands)
-            scheduleCommandIfNecessaryAndPossible(Cmd);
-          DeferredCommands.clear();
-          break;
-        case DependencyGraphImpl::LoadResult::UpToDate:
-          Condition = Cmd->getCondition();
-          break;
-        case DependencyGraphImpl::LoadResult::AffectsDownstream:
-          llvm_unreachable("we haven't marked anything in this graph yet");
-        }
-      }
-    }
-
-    switch (Condition) {
-    case Job::Condition::Always:
-      if (getIncrementalBuildEnabled() && !DependenciesFile.empty()) {
-        InitialOutOfDateCommands.push_back(Cmd);
-        DepGraph.markIntransitive(Cmd);
-      }
-      SWIFT_FALLTHROUGH;
-    case Job::Condition::RunWithoutCascading:
-      noteBuilding(Cmd, "(initial)");
-      scheduleCommandIfNecessaryAndPossible(Cmd);
-      break;
-    case Job::Condition::CheckDependencies:
-      DeferredCommands.insert(Cmd);
-      break;
-    case Job::Condition::NewlyAdded:
-      llvm_unreachable("handled above");
-    }
-  }
-
-  if (getIncrementalBuildEnabled()) {
-    SmallVector<const Job *, 16> AdditionalOutOfDateCommands;
-
-    // We scheduled all of the files that have actually changed. Now add the
-    // files that haven't changed, so that they'll get built in parallel if
-    // possible and after the first set of files if it's not.
-    for (auto *Cmd : InitialOutOfDateCommands) {
-      DepGraph.markTransitive(AdditionalOutOfDateCommands, Cmd,
-                              IncrementalTracer);
-    }
-
-    for (auto *transitiveCmd : AdditionalOutOfDateCommands)
-      noteBuilding(transitiveCmd, "because of the initial set:");
-    size_t firstSize = AdditionalOutOfDateCommands.size();
-
-    // Check all cross-module dependencies as well.
-    for (StringRef dependency : DepGraph.getExternalDependencies()) {
-      llvm::sys::fs::file_status depStatus;
-      if (!llvm::sys::fs::status(dependency, depStatus))
-        if (depStatus.getLastModificationTime() < LastBuildTime)
-          continue;
-
-      // If the dependency has been modified since the oldest built file,
-      // or if we can't stat it for some reason (perhaps it's been deleted?),
-      // trigger rebuilds through the dependency graph.
-      DepGraph.markExternal(AdditionalOutOfDateCommands, dependency);
-    }
-
-    for (auto *externalCmd :
-            llvm::makeArrayRef(AdditionalOutOfDateCommands).slice(firstSize)) {
-      noteBuilding(externalCmd, "because of external dependencies");
-    }
-
-    for (auto *AdditionalCmd : AdditionalOutOfDateCommands) {
-      if (!DeferredCommands.count(AdditionalCmd))
-        continue;
-      scheduleCommandIfNecessaryAndPossible(AdditionalCmd);
-      DeferredCommands.erase(AdditionalCmd);
-    }
-  }
-
-  int Result = EXIT_SUCCESS;
-  llvm::TimerGroup DriverTimerGroup("Driver Time Compilation");
-  llvm::SmallDenseMap<const Job *, std::unique_ptr<llvm::Timer>, 16>
-    DriverTimers;
-
-  // Set up a callback which will be called immediately after a task has
-  // started. This callback may be used to provide output indicating that the
-  // task began.
-  auto taskBegan = [&] (ProcessId Pid, void *Context) {
-    // TODO: properly handle task began.
-    const Job *BeganCmd = (const Job *)Context;
-
-    if (ShowDriverTimeCompilation) {
-      llvm::SmallString<128> TimerName;
-      llvm::raw_svector_ostream OS(TimerName);
-
-      OS << BeganCmd->getSource().getClassName();
-      for (auto A : BeganCmd->getSource().getInputs()) {
-        if (const InputAction *IA = dyn_cast<InputAction>(A)) {
-          OS << " " << IA->getInputArg().getValue();
-        }
-      }
-      for (auto J : BeganCmd->getInputs()) {
-        for (auto A : J->getSource().getInputs()) {
-          if (const InputAction *IA = dyn_cast<InputAction>(A)) {
-            OS << " " << IA->getInputArg().getValue();
-          }
-        }
-      }
-
-      DriverTimers.insert({
-        BeganCmd,
-        std::unique_ptr<llvm::Timer>(
-          new llvm::Timer(OS.str(), DriverTimerGroup))
-      });
-      DriverTimers[BeganCmd]->startTimer();
-    }
-
-    // For verbose output, print out each command as it begins execution.
-    if (Level == OutputLevel::Verbose)
-      BeganCmd->printCommandLine(llvm::errs());
-    else if (Level == OutputLevel::Parseable)
-      parseable_output::emitBeganMessage(llvm::errs(), *BeganCmd, Pid);
-  };
-
-  // Set up a callback which will be called immediately after a task has
-  // finished execution. This callback should determine if execution should
-  // continue (if execution should stop, this callback should return true), and
-  // it should also schedule any additional commands which we now know need
-  // to run.
-  auto taskFinished = [&] (ProcessId Pid, int ReturnCode, StringRef Output,
-                           void *Context) -> TaskFinishedResponse {
-    const Job *FinishedCmd = (const Job *)Context;
-
-    if (ShowDriverTimeCompilation) {
-      DriverTimers[FinishedCmd]->stopTimer();
-    }
-
-    if (Level == OutputLevel::Parseable) {
-      // Parseable output was requested.
-      parseable_output::emitFinishedMessage(llvm::errs(), *FinishedCmd, Pid,
-                                            ReturnCode, Output);
-    } else {
-      // Otherwise, send the buffered output to stderr, though only if we
-      // support getting buffered output.
-      if (TaskQueue::supportsBufferingOutput())
-        llvm::errs() << Output;
-    }
-
-    // In order to handle both old dependencies that have disappeared and new
-    // dependencies that have arisen, we need to reload the dependency file.
-    // Do this whether or not the build succeeded.
-    SmallVector<const Job *, 16> Dependents;
-    if (getIncrementalBuildEnabled()) {
-      const CommandOutput &Output = FinishedCmd->getOutput();
-      StringRef DependenciesFile =
-        Output.getAdditionalOutputForType(types::TY_SwiftDeps);
-
-      if (DependenciesFile.empty()) {
-        // If this job doesn't track dependencies, it must always be run.
-        // Note: In theory CheckDependencies makes sense as well (for a leaf
-        // node in the dependency graph), and maybe even NewlyAdded (for very
-        // coarse dependencies that always affect downstream nodes), but we're
-        // not using either of those right now, and this logic should probably
-        // be revisited when we are.
-        assert(FinishedCmd->getCondition() == Job::Condition::Always);
-      } else {
-        // If we have a dependency file /and/ the frontend task exited normally,
-        // we can be discerning about what downstream files to rebuild.
-        if (ReturnCode == EXIT_SUCCESS || ReturnCode == EXIT_FAILURE) {
-          bool wasCascading = DepGraph.isMarked(FinishedCmd);
-
-          switch (DepGraph.loadFromPath(FinishedCmd, DependenciesFile)) {
-          case DependencyGraphImpl::LoadResult::HadError:
-            if (ReturnCode == EXIT_SUCCESS) {
-              disableIncrementalBuild();
-              for (const Job *Cmd : DeferredCommands)
-                scheduleCommandIfNecessaryAndPossible(Cmd);
-              DeferredCommands.clear();
-              Dependents.clear();
-            } // else, let the next build handle it.
-            break;
-          case DependencyGraphImpl::LoadResult::UpToDate:
-            if (!wasCascading)
-              break;
-            SWIFT_FALLTHROUGH;
-          case DependencyGraphImpl::LoadResult::AffectsDownstream:
-            DepGraph.markTransitive(Dependents, FinishedCmd);
-            break;
-          }
+    switch (filelistInfo.whichFiles) {
+    case FilelistInfo::WhichFiles::Input:
+      // FIXME: Duplicated from ToolChains.cpp.
+      for (const Job *input : job->getInputs()) {
+        const CommandOutput &outputInfo = input->getOutput();
+        if (outputInfo.getPrimaryOutputType() == filelistInfo.type) {
+          for (auto &output : outputInfo.getPrimaryOutputFilenames())
+            out << output << "\n";
         } else {
-          // If there's an abnormal exit (a crash), assume the worst.
-          switch (FinishedCmd->getCondition()) {
-          case Job::Condition::NewlyAdded:
-            // The job won't be treated as newly added next time. Conservatively
-            // mark it as affecting other jobs, because some of them may have
-            // completed already.
-            DepGraph.markTransitive(Dependents, FinishedCmd);
-            break;
-          case Job::Condition::Always:
-            // Any incremental task that shows up here has already been marked;
-            // we didn't need to wait for it to finish to start downstream
-            // tasks.
-            assert(DepGraph.isMarked(FinishedCmd));
-            break;
-          case Job::Condition::RunWithoutCascading:
-            // If this file changed, it might have been a non-cascading change
-            // and it might not. Unfortunately, the interface hash has been
-            // updated or compromised, so we don't actually know anymore; we
-            // have to conservatively assume the changes could affect other
-            // files.
-            DepGraph.markTransitive(Dependents, FinishedCmd);
-            break;
-          case Job::Condition::CheckDependencies:
-            // If the only reason we're running this is because something else
-            // changed, then we can trust the dependency graph as to whether
-            // it's a cascading or non-cascading change. That is, if whatever
-            // /caused/ the error isn't supposed to affect other files, and
-            // whatever /fixes/ the error isn't supposed to affect other files,
-            // then there's no need to recompile any other inputs. If either of
-            // those are false, we /do/ need to recompile other inputs.
-            break;
-          }
+          auto output = outputInfo.getAnyOutputForType(filelistInfo.type);
+          if (!output.empty())
+            out << output << "\n";
         }
       }
-    }
-
-    if (ReturnCode != EXIT_SUCCESS) {
-      // The task failed, so return true without performing any further
-      // dependency analysis.
-
-      // Store this task's ReturnCode as our Result if we haven't stored
-      // anything yet.
-      if (Result == EXIT_SUCCESS)
-        Result = ReturnCode;
-
-      if (!isa<CompileJobAction>(FinishedCmd->getSource()) ||
-          ReturnCode != EXIT_FAILURE) {
-        Diags.diagnose(SourceLoc(), diag::error_command_failed,
-                       FinishedCmd->getSource().getClassName(),
-                       ReturnCode);
+      break;
+    case FilelistInfo::WhichFiles::PrimaryInputs:
+      for (const Action *A : job->getSource().getInputs()) {
+        const auto *IA = cast<InputAction>(A);
+        out << IA->getInputArg().getValue() << "\n";
       }
-
-      return ContinueBuildingAfterErrors ?
-          TaskFinishedResponse::ContinueExecution :
-          TaskFinishedResponse::StopExecution;
-    }
-
-    // When a task finishes, we need to reevaluate the other commands that
-    // might have been blocked.
-    markFinished(FinishedCmd);
-
-    for (const Job *Cmd : Dependents) {
-      DeferredCommands.erase(Cmd);
-      noteBuilding(Cmd, "because of dependencies discovered later");
-      scheduleCommandIfNecessaryAndPossible(Cmd);
-    }
-
-    return TaskFinishedResponse::ContinueExecution;
-  };
-
-  auto taskSignalled = [&] (ProcessId Pid, StringRef ErrorMsg, StringRef Output,
-                            void *Context) -> TaskFinishedResponse {
-    const Job *SignalledCmd = (const Job *)Context;
-
-    if (ShowDriverTimeCompilation) {
-      DriverTimers[SignalledCmd]->stopTimer();
-    }
-
-    if (Level == OutputLevel::Parseable) {
-      // Parseable output was requested.
-      parseable_output::emitSignalledMessage(llvm::errs(), *SignalledCmd, Pid,
-                                             ErrorMsg, Output);
-    } else {
-      // Otherwise, send the buffered output to stderr, though only if we
-      // support getting buffered output.
-      if (TaskQueue::supportsBufferingOutput())
-        llvm::errs() << Output;
-    }
-
-    if (!ErrorMsg.empty())
-      Diags.diagnose(SourceLoc(), diag::error_unable_to_execute_command,
-                     ErrorMsg);
-
-    Diags.diagnose(SourceLoc(), diag::error_command_signalled,
-                   SignalledCmd->getSource().getClassName());
-
-    // Since the task signalled, unconditionally set result to -2.
-    Result = -2;
-
-    return TaskFinishedResponse::StopExecution;
-  };
-
-  do {
-    // Ask the TaskQueue to execute.
-    TQ->execute(taskBegan, taskFinished, taskSignalled);
-
-    // Mark all remaining deferred commands as skipped.
-    for (const Job *Cmd : DeferredCommands) {
-      if (Level == OutputLevel::Parseable) {
-        // Provide output indicating this command was skipped if parseable output
-        // was requested.
-        parseable_output::emitSkippedMessage(llvm::errs(), *Cmd);
-      }
-
-      State.ScheduledCommands.insert(Cmd);
-      markFinished(Cmd);
-    }
-
-    // ...which may allow us to go on and do later tasks.
-  } while (Result == 0 && TQ->hasRemainingTasks());
-
-  if (Result == 0) {
-    assert(State.BlockingCommands.empty() &&
-           "some blocking commands never finished properly");
-  } else {
-    // Make sure we record any files that still need to be rebuilt.
-    for (const Job *Cmd : getJobs()) {
-      // Skip files that don't use dependency analysis.
-      StringRef DependenciesFile =
-          Cmd->getOutput().getAdditionalOutputForType(types::TY_SwiftDeps);
-      if (DependenciesFile.empty())
-        continue;
-
-      // Don't worry about commands that finished or weren't going to run.
-      if (State.FinishedCommands.count(Cmd))
-        continue;
-      if (!State.ScheduledCommands.count(Cmd))
-        continue;
-
-      bool isCascading = true;
-      if (getIncrementalBuildEnabled())
-        isCascading = DepGraph.isMarked(Cmd);
-      State.UnfinishedCommands.insert({Cmd, isCascading});
+      break;
+    case FilelistInfo::WhichFiles::Output:
+      const CommandOutput &outputInfo = job->getOutput();
+      assert(outputInfo.getPrimaryOutputType() == filelistInfo.type);
+      for (auto &output : outputInfo.getPrimaryOutputFilenames())
+        out << output << "\n";
+      break;
     }
   }
+  return ok;
+}
+
+int Compilation::performJobsImpl(bool &abnormalExit) {
+  PerformJobsState State(*this);
+
+  State.scheduleInitialJobs();
+  State.scheduleAdditionalJobs();
+  State.formBatchJobsAndAddPendingJobsToTaskQueue();
+  State.runTaskQueueToCompletion();
+  State.checkUnfinishedJobs();
 
   if (!CompilationRecordPath.empty() && !SkipTaskExecution) {
     InputInfoMap InputInfo;
-    populateInputInfoMap(InputInfo, State);
+    State.populateInputInfoMap(InputInfo);
     checkForOutOfDateInputs(Diags, InputInfo);
     writeCompilationRecord(CompilationRecordPath, ArgsHash, BuildStartTime,
                            InputInfo);
   }
 
-  if (Result == 0)
-    Result = Diags.hadAnyError();
-  return Result;
+  abnormalExit = State.hadAnyAbnormalExit();
+  return State.getResult();
 }
 
 int Compilation::performSingleCommand(const Job *Cmd) {
@@ -712,26 +1174,38 @@ int Compilation::performSingleCommand(const Job *Cmd) {
   if (!writeFilelistIfNecessary(Cmd, Diags))
     return 1;
 
-  if (Level == OutputLevel::Verbose)
+  switch (Level) {
+  case OutputLevel::Normal:
+  case OutputLevel::Parseable:
+    break;
+  case OutputLevel::PrintJobs:
+    Cmd->printCommandLineAndEnvironment(llvm::outs());
+    return 0;
+  case OutputLevel::Verbose:
     Cmd->printCommandLine(llvm::errs());
+    break;
+  }
 
   SmallVector<const char *, 128> Argv;
   Argv.push_back(Cmd->getExecutable());
   Argv.append(Cmd->getArguments().begin(), Cmd->getArguments().end());
-  Argv.push_back(0);
+  Argv.push_back(nullptr);
 
   const char *ExecPath = Cmd->getExecutable();
   const char **argv = Argv.data();
 
   for (auto &envPair : Cmd->getExtraEnvironment()) {
 #if defined(_MSC_VER)
-    llvm::SmallString<256> envStr = StringRef(envPair.first);
-    envStr.append(StringRef("="));
-    envStr.append(StringRef(envPair.second));
-    _putenv(envStr.c_str());
+    int envResult =_putenv_s(envPair.first, envPair.second);
 #else
-    setenv(envPair.first, envPair.second, /*replacing=*/true);
+    int envResult = setenv(envPair.first, envPair.second, /*replacing=*/true);
 #endif
+    assert(envResult == 0 &&
+          "expected environment variable to be set successfully");
+    // Bail out early in release builds.
+    if (envResult != 0) {
+      return envResult;
+    }
   }
 
   return ExecuteInPlace(ExecPath, argv);
@@ -774,18 +1248,18 @@ int Compilation::performJobs() {
   if (!TaskQueue::supportsParallelExecution() && NumberOfParallelCommands > 1) {
     Diags.diagnose(SourceLoc(), diag::warning_parallel_execution_not_supported);
   }
-  
-  int result = performJobsImpl();
+
+  bool abnormalExit;
+  int result = performJobsImpl(abnormalExit);
 
   if (!SaveTemps) {
-    // FIXME: Do we want to be deleting temporaries even when a child process
-    // crashes?
-    for (auto &path : TempFilePaths) {
-      // Ignore the error code for removing temporary files.
-      (void)llvm::sys::fs::remove(path);
+    for (const auto &pathPair : TempFilePaths) {
+      if (!abnormalExit || pathPair.getValue() == PreserveOnSignal::No)
+        (void)llvm::sys::fs::remove(pathPair.getKey());
     }
   }
-
+  if (Stats)
+    Stats->noteCurrentProcessExitStatus(result);
   return result;
 }
 
@@ -802,7 +1276,7 @@ const char *Compilation::getAllSourcesPath() const {
       llvm::report_fatal_error("unable to create list of input sources");
     }
     auto *mutableThis = const_cast<Compilation *>(this);
-    mutableThis->addTemporaryFile(Buffer.str());
+    mutableThis->addTemporaryFile(Buffer.str(), PreserveOnSignal::Yes);
     mutableThis->AllSourceFilesPath = getArgs().MakeArgString(Buffer);
   }
   return AllSourceFilesPath;

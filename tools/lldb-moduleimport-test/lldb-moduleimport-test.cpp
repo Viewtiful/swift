@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,6 +18,7 @@
 
 #include "swift/ASTSectionImporter/ASTSectionImporter.h"
 #include "swift/Frontend/Frontend.h"
+#include "swift/IDE/Utils.h"
 #include "swift/Serialization/SerializedModuleLoader.h"
 #include "swift/Serialization/Validation.h"
 #include "swift/Basic/Dwarf.h"
@@ -62,7 +63,8 @@ static void printValidationInfo(llvm::StringRef data) {
 }
 
 int main(int argc, char **argv) {
-  INITIALIZE_LLVM(argc, argv);
+  PROGRAM_START(argc, argv);
+  INITIALIZE_LLVM();
 
   // Command line handling.
   llvm::cl::list<std::string> InputNames(
@@ -76,6 +78,9 @@ int main(int argc, char **argv) {
     "dump-module", llvm::cl::desc(
       "Dump the imported module after checking it imports just fine"));
 
+  llvm::cl::opt<bool> Verbose(
+      "verbose", llvm::cl::desc("Dump informations on the loaded module"));
+
   llvm::cl::opt<std::string> ModuleCachePath(
     "module-cache-path", llvm::cl::desc("Clang module cache path"));
 
@@ -85,6 +90,9 @@ int main(int argc, char **argv) {
   llvm::cl::list<std::string> FrameworkPaths(
     "F", llvm::cl::desc("add a directory to the framework search path"));
 
+  llvm::cl::opt<std::string> DumpTypeFromMangled(
+      "type-from-mangled", llvm::cl::desc("dump type from mangled name"));
+
   llvm::cl::ParseCommandLineOptions(argc, argv);
   // Unregister our options so they don't interfere with the command line
   // parsing in CodeGen/BackendUtil.cpp.
@@ -92,6 +100,7 @@ int main(int argc, char **argv) {
   ImportPaths.removeArgument();
   ModuleCachePath.removeArgument();
   DumpModule.removeArgument();
+  DumpTypeFromMangled.removeArgument();
   SDK.removeArgument();
   InputNames.removeArgument();
 
@@ -116,7 +125,11 @@ int main(int argc, char **argv) {
   Invocation.setModuleName("lldbtest");
   Invocation.getClangImporterOptions().ModuleCachePath = ModuleCachePath;
   Invocation.setImportSearchPaths(ImportPaths);
-  Invocation.setFrameworkSearchPaths(FrameworkPaths);
+  std::vector<swift::SearchPathOptions::FrameworkSearchPath> FramePaths;
+  for (const auto &path : FrameworkPaths) {
+    FramePaths.push_back({path, /*isSystem=*/false});
+  }
+  Invocation.setFrameworkSearchPaths(FramePaths);
 
   if (CI.setup(Invocation))
     return 1;
@@ -157,10 +170,12 @@ int main(int argc, char **argv) {
             exit(1);
           }
 
-          for (auto path : modules)
-            llvm::outs() << "Loaded module " << path << " from " << name
-                         << "\n";
-          printValidationInfo(fileBuf.get()->getBuffer());
+          if (Verbose) {
+            for (auto path : modules)
+              llvm::outs() << "Loaded module " << path << " from " << name
+                           << "\n";
+            printValidationInfo(fileBuf.get()->getBuffer());
+          }
 
           // Deliberately leak the llvm::MemoryBuffer. We can't delete it
           // while it's in use anyway.
@@ -178,10 +193,12 @@ int main(int argc, char **argv) {
         if (!parseASTSection(CI.getSerializedModuleLoader(), Buf, modules))
           exit(1);
 
-        for (auto path : modules)
-          llvm::outs() << "Loaded module " << path << " from " << name
-                       << "\n";
-        printValidationInfo(Buf);
+        if (Verbose) {
+          for (auto path : modules)
+            llvm::outs() << "Loaded module " << path << " from " << name
+                         << "\n";
+          printValidationInfo(Buf);
+        }
       }
     }
     ObjFiles.push_back(std::move(*OF));
@@ -189,7 +206,8 @@ int main(int argc, char **argv) {
 
   // Attempt to import all modules we found.
   for (auto path : modules) {
-    llvm::outs() << "Importing " << path << "... ";
+    if (Verbose)
+      llvm::outs() << "Importing " << path << "... ";
 
 #ifdef SWIFT_SUPPORTS_SUBMODULES
     std::vector<std::pair<swift::Identifier, swift::SourceLoc> > AccessPath;
@@ -206,15 +224,41 @@ int main(int argc, char **argv) {
 
     auto Module = CI.getASTContext().getModule(AccessPath);
     if (!Module) {
-      llvm::errs() << "FAIL!\n";
+      if (Verbose)
+        llvm::errs() << "FAIL!\n";
       return 1;
     }
-    llvm::outs() << "ok!\n";
+    if (Verbose)
+      llvm::outs() << "ok!\n";
     if (DumpModule) {
       llvm::SmallVector<swift::Decl*, 10> Decls;
       Module->getTopLevelDecls(Decls);
       for (auto Decl : Decls) {
         Decl->dump(llvm::outs());
+      }
+    }
+    if (!DumpTypeFromMangled.empty()) {
+      std::string Error;
+      std::string Name;
+      swift::ASTContext &Ctx = CI.getASTContext();
+      llvm::SmallVector<std::string, 8> MangledNames;
+
+      std::ifstream InputStream(DumpTypeFromMangled);
+      while (std::getline(InputStream, Name)) {
+        if (Name.empty())
+          continue;
+        MangledNames.push_back(Name);
+      }
+
+      for (auto &Mangled : MangledNames) {
+        swift::Type ResolvedType = swift::ide::getTypeFromMangledSymbolname(
+            Ctx, Mangled, Error);
+        if (!ResolvedType) {
+          llvm::errs() << "Can't resolve type of " << Mangled << "\n";
+        } else {
+          ResolvedType->print(llvm::errs());
+          llvm::errs() << "\n";
+        }
       }
     }
   }

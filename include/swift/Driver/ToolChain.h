@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -90,7 +90,7 @@ protected:
     const char *ExecutableName;
     llvm::opt::ArgStringList Arguments;
     std::vector<std::pair<const char *, const char *>> ExtraEnvironment;
-    FilelistInfo FilelistInfo;
+    std::vector<FilelistInfo> FilelistInfos;
 
     InvocationInfo(const char *name, llvm::opt::ArgStringList args = {},
                    decltype(ExtraEnvironment) extraEnv = {})
@@ -120,6 +120,12 @@ protected:
 
   virtual InvocationInfo
   constructInvocation(const GenerateDSYMJobAction &job,
+                      const JobContext &context) const;
+  virtual InvocationInfo
+  constructInvocation(const VerifyDebugInfoJobAction &job,
+                      const JobContext &context) const;
+  virtual InvocationInfo
+  constructInvocation(const GeneratePCHJobAction &job,
                       const JobContext &context) const;
   virtual InvocationInfo
   constructInvocation(const AutolinkExtractJobAction &job,
@@ -156,12 +162,48 @@ public:
   std::unique_ptr<Job> constructJob(const JobAction &JA,
                                     Compilation &C,
                                     SmallVectorImpl<const Job *> &&inputs,
-                                    const ActionList &inputActions,
+                                    ArrayRef<const Action *> inputActions,
                                     std::unique_ptr<CommandOutput> output,
                                     const OutputInfo &OI) const;
 
+  /// Return true iff the input \c Job \p A is an acceptable candidate for
+  /// batching together into a BatchJob, via a call to \c
+  /// constructBatchJob. This is true when the \c Job is a built from a \c
+  /// CompileJobAction in a \c Compilation \p C running in \c
+  /// OutputInfo::Mode::StandardCompile output mode, with a single \c TY_Swift
+  /// \c InputAction.
+  bool jobIsBatchable(const Compilation &C, const Job *A) const;
+
+  /// Equivalence relation that holds iff the two input Jobs \p A and \p B are
+  /// acceptable candidates for combining together into a \c BatchJob, via a
+  /// call to \c constructBatchJob. This is true when each job independently
+  /// satisfies \c jobIsBatchable, and the two jobs have identical executables,
+  /// output types and environments (i.e. they are identical aside from their
+  /// inputs).
+  bool jobsAreBatchCombinable(const Compilation &C, const Job *A,
+                              const Job *B) const;
+
+  /// Construct a \c BatchJob that subsumes the work of a set of Jobs. Any pair
+  /// of elements in \p Jobs are assumed to satisfy the equivalence relation \c
+  /// jobsAreBatchCombinable, i.e. they should all be "the same" job in in all
+  /// ways other than their choices of inputs.
+  std::unique_ptr<Job> constructBatchJob(ArrayRef<const Job *> Jobs,
+                                         Compilation &C) const;
+
   /// Return the default language type to use for the given extension.
+  /// If the extension is empty or is otherwise not recognized, return
+  /// the invalid type \c TY_INVALID.
   virtual types::ID lookupTypeForExtension(StringRef Ext) const;
+
+  /// Check whether a clang library with a given name exists.
+  ///
+  /// \param args Invocation arguments.
+  /// \param sanitizer Sanitizer name.
+  /// \param shared Whether the library is shared
+  virtual bool sanitizerRuntimeLibExists(const llvm::opt::ArgList &args,
+                                         StringRef sanitizer,
+                                         bool shared=true) const;
+
 };
 } // end namespace driver
 } // end namespace swift

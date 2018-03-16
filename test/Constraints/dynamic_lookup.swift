@@ -1,6 +1,6 @@
-// RUN: rm -rf %t && mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: %target-swift-frontend -emit-module %S/Inputs/PrivateObjC.swift -o %t
-// RUN: %target-parse-verify-swift -I %t
+// RUN: %target-typecheck-verify-swift -I %t -verify-ignore-unknown
 
 // REQUIRES: objc_interop
 import Foundation
@@ -180,7 +180,7 @@ obj.generic4!(5) // expected-error{{value of type 'Id' (aka 'AnyObject') has no 
 // Find properties via dynamic lookup.
 var prop1Result : Int = obj.prop1!
 var prop2Result : String = obj.prop2!
-obj.prop2 = "hello" // expected-error{{cannot assign to property: 'obj' is immutable}}
+obj.prop2 = "hello" // expected-error{{cannot assign to immutable expression of type 'String?'}}
 var protoPropResult : Int = obj.protoProp!
 
 // Find subscripts via dynamic lookup
@@ -199,7 +199,7 @@ let prop3ResultCChecked: Int? = prop3ResultC
 
 var obj2 : AnyObject & P = Y()
 
-class Z2 : AnyObject { }
+class Z2 { }
 class Z3<T : AnyObject> { }
 class Z4<T> where T : AnyObject { }
 
@@ -217,8 +217,8 @@ let uopt : AnyObject! = nil
 uopt.wibble!()
 
 // Should not be able to see private or internal @objc methods.
-uopt.privateFoo!() // expected-error{{'privateFoo' is inaccessible due to 'private' protection level}}
-uopt.internalFoo!() // expected-error{{'internalFoo' is inaccessible due to 'internal' protection level}}
+uopt.privateFoo!() // expected-error{{value of type 'AnyObject?' has no member 'privateFoo'}}
+uopt.internalFoo!() // expected-error{{value of type 'AnyObject?' has no member 'internalFoo'}}
 
 let anyValue: Any = X()
 _ = anyValue.bar() // expected-error {{value of type 'Any' has no member 'bar'}}
@@ -230,3 +230,85 @@ var anyDict: [String : Any] = Dictionary<String, Any>()
 anyDict["test"] = anyValue
 _ = anyDict["test"]!.bar() // expected-error {{value of type 'Any' has no member 'bar'}}
 // expected-note@-1 {{cast 'Any' to 'AnyObject' or use 'as!' to force downcast to a more specific type to access members}}{{5-5=(}}{{21-21= as AnyObject)}}
+
+// Test that overload resolution during constraint solving of values
+// looked-up dynamically through AnyObject are treated as conforming
+// to the protocols they are supposed to conform to.
+class NSObjDerived1 : NSObject {
+  @objc var everything: [Any] = []
+}
+
+class NSObjDerived2 : NSObject {
+  var everything: Any = 1
+}
+
+func rdar29960565(_ o: AnyObject) {
+  for i in o.everything {
+    _ = i
+  }
+}
+
+// FIXME: Remove -verify-ignore-unknown.
+// <unknown>:0: error: unexpected note produced: 'privateFoo' declared here
+// <unknown>:0: error: unexpected note produced: 'internalFoo' declared here
+
+@objc protocol Q {}
+
+@objc class Dynamic : NSObject, Q {
+  @objc var s: String = ""
+  @objc func foo() -> String {}
+  @objc subscript(_: String) -> String {
+    get {
+      return "hi"
+    }
+    set {}
+  }
+}
+
+@objc class DynamicIUO : NSObject, Q {
+  @objc var t: String! = ""
+  @objc func bar() -> String! {}
+  @objc subscript(_: DynamicIUO) -> DynamicIUO! {
+    get {
+      return self
+    }
+    set {}
+  }
+}
+
+var dyn = Dynamic()
+var dyn_iuo = DynamicIUO()
+let s = "hi"
+var o: AnyObject = dyn
+let _: String = o.s
+let _: String = o.s!
+let _: String? = o.s
+let _: String = o.foo()
+let _: String = o.foo!()
+let _: String? = o.foo()
+let _: String = o[s]
+let _: String = o[s]!
+let _: String? = o[s]
+// FIXME: These should all produce lvalues that we can write through
+o.s = s // expected-error {{cannot assign to immutable expression of type 'String?'}}
+o.s! = s // expected-error {{cannot assign to immutable expression of type 'String'}}
+o[s] = s // expected-error {{cannot assign to immutable expression of type 'String?'}}
+o[s]! = s // expected-error {{cannot assign to immutable expression of type 'String'}}
+
+let _: String = o.t
+let _: String = o.t!
+let _: String = o.t!!
+let _: String? = o.t
+let _: String = o.bar()
+let _: String = o.bar!()
+let _: String = o.bar()!
+let _: String = o.bar!()!
+let _: String? = o.bar()
+let _: DynamicIUO = o[dyn_iuo]
+let _: DynamicIUO = o[dyn_iuo]!
+let _: DynamicIUO = o[dyn_iuo]!!
+let _: DynamicIUO? = o[dyn_iuo]
+// FIXME: These should all produce lvalues that we can write through
+o[dyn_iuo] = dyn_iuo // expected-error {{cannot assign to immutable expression of type 'DynamicIUO??'}}
+o[dyn_iuo]! = dyn_iuo // expected-error {{cannot assign to immutable expression of type 'DynamicIUO?'}}
+o[dyn_iuo]!! = dyn_iuo // expected-error {{cannot assign to immutable expression of type 'DynamicIUO'}}

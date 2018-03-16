@@ -2,16 +2,17 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 @_exported
 import ObjectiveC
+import _SwiftObjectiveCOverlayShims
 
 //===----------------------------------------------------------------------===//
 // Objective-C Primitive Types
@@ -24,7 +25,7 @@ import ObjectiveC
 /// ObjCBool.
 @_fixed_layout
 public struct ObjCBool : ExpressibleByBooleanLiteral {
-#if os(OSX) || (os(iOS) && (arch(i386) || arch(arm)))
+#if os(macOS) || (os(iOS) && (arch(i386) || arch(arm)))
   // On OS X and 32-bit iOS, Objective-C's BOOL type is a "signed char".
   var _value: Int8
 
@@ -47,7 +48,7 @@ public struct ObjCBool : ExpressibleByBooleanLiteral {
 
   /// The value of `self`, expressed as a `Bool`.
   public var boolValue: Bool {
-#if os(OSX) || (os(iOS) && (arch(i386) || arch(arm)))
+#if os(macOS) || (os(iOS) && (arch(i386) || arch(arm)))
     return _value != 0
 #else
     return _value
@@ -103,16 +104,6 @@ public struct Selector : ExpressibleByStringLiteral {
     ptr = str.withCString { sel_registerName($0).ptr }
   }
 
-  /// Create an instance initialized to `value`.
-  public init(unicodeScalarLiteral value: String) {
-    self.init(value)
-  }
-
-  /// Construct a selector from `value`.
-  public init(extendedGraphemeClusterLiteral value: String) {
-    self.init(value)
-  }
-
   // FIXME: Fast-path this in the compiler, so we don't end up with
   // the sel_registerName call at compile time.
   /// Create an instance initialized to `value`.
@@ -121,11 +112,11 @@ public struct Selector : ExpressibleByStringLiteral {
   }
 }
 
-public func ==(lhs: Selector, rhs: Selector) -> Bool {
-  return sel_isEqual(lhs, rhs)
-}
-
 extension Selector : Equatable, Hashable {
+  public static func ==(lhs: Selector, rhs: Selector) -> Bool {
+    return sel_isEqual(lhs, rhs)
+  }
+
   /// The hash value.
   ///
   /// **Axiom:** `x == y` implies `x.hashValue == y.hashValue`
@@ -141,11 +132,7 @@ extension Selector : Equatable, Hashable {
 extension Selector : CustomStringConvertible {
   /// A textual representation of `self`.
   public var description: String {
-    let name = sel_getName(self)
-    if name == nil {
-      return "<NULL>"
-    }
-    return String(cString: name!)
+    return String(_sel: self)
   }
 }
 
@@ -180,18 +167,12 @@ typealias Zone = NSZone
 // @autoreleasepool substitute
 //===----------------------------------------------------------------------===//
 
-@_silgen_name("_swift_objc_autoreleasePoolPush")
-func __pushAutoreleasePool() -> OpaquePointer
-
-@_silgen_name("_swift_objc_autoreleasePoolPop")
-func __popAutoreleasePool(_ pool: OpaquePointer)
-
 public func autoreleasepool<Result>(
   invoking body: () throws -> Result
 ) rethrows -> Result {
-  let pool = __pushAutoreleasePool()
+  let pool = _swift_objc_autoreleasePoolPush()
   defer {
-    __popAutoreleasePool(pool)
+    _swift_objc_autoreleasePoolPop(pool)
   }
   return try body()
 }
@@ -218,6 +199,10 @@ public var NO: ObjCBool {
 // FIXME: what about NSObjectProtocol?
 
 extension NSObject : Equatable, Hashable {
+  public static func == (lhs: NSObject, rhs: NSObject) -> Bool {
+    return lhs.isEqual(rhs)
+  }
+
   /// The hash value.
   ///
   /// **Axiom:** `x == y` implies `x.hashValue == y.hashValue`
@@ -225,13 +210,10 @@ extension NSObject : Equatable, Hashable {
   /// - Note: the hash value is not guaranteed to be stable across
   ///   different invocations of the same program.  Do not persist the
   ///   hash value across program runs.
+  @objc
   open var hashValue: Int {
     return hash
   }
-}
-
-public func == (lhs: NSObject, rhs: NSObject) -> Bool {
-  return lhs.isEqual(rhs)
 }
 
 extension NSObject : CVarArg {

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -42,7 +42,7 @@ class ModuleDecl;
 class ConformanceLookupTable {
   /// Describes the stage at which a particular nominal type or
   /// extension's conformances has been processed.
-  enum class ConformanceStage : unsigned char {
+  enum class ConformanceStage : uint8_t {
     /// The explicit conformances have been recorded in the lookup table.
     RecordedExplicit,
 
@@ -152,6 +152,8 @@ class ConformanceLookupTable {
                  ? ConformanceEntryKind::Synthesized
                  : ConformanceEntryKind::Implied;
       }
+
+      llvm_unreachable("Unhandled ConformanceEntryKind in switch.");
     }
 
     /// For an inherited conformance, retrieve the class declaration
@@ -229,6 +231,8 @@ class ConformanceLookupTable {
       case ConformanceEntryKind::Inherited:
         return true;
       }
+
+      llvm_unreachable("Unhandled ConformanceEntryKind in switch.");
     }
 
     /// Whether this protocol conformance was superseded by another
@@ -327,12 +331,11 @@ class ConformanceLookupTable {
   bool VisitingSuperclass = false;
 
   /// Add a protocol.
-  bool addProtocol(NominalTypeDecl *nominal,
-                   ProtocolDecl *protocol, SourceLoc loc,
+  bool addProtocol(ProtocolDecl *protocol, SourceLoc loc,
                    ConformanceSource source);
 
   /// Add the protocols from the given list.
-  void addProtocols(NominalTypeDecl *nominal, ArrayRef<TypeLoc> inherited,
+  void addProtocols(ArrayRef<TypeLoc> inherited,
                     ConformanceSource source, LazyResolver *resolver);
 
   /// Expand the implied conformances for the given DeclContext.
@@ -359,20 +362,16 @@ class ConformanceLookupTable {
   ///
   /// \returns true if any conformance entries were superseded by this
   /// operation.
-  bool resolveConformances(NominalTypeDecl *nominal,
-                           ProtocolDecl *protocol,
-                           LazyResolver *resolver);
+  bool resolveConformances(ProtocolDecl *protocol);
 
   /// Retrieve the declaration context that provides the
   /// (non-inherited) conformance described by the given conformance
   /// entry.
   DeclContext *getConformingContext(NominalTypeDecl *nominal,
-                                    LazyResolver *resolver,
                                     ConformanceEntry *entry);
 
   /// Resolve the given conformance entry to an actual protocol conformance.
   ProtocolConformance *getConformance(NominalTypeDecl *nominal,
-                                      LazyResolver *resolver,
                                       ConformanceEntry *entry);
 
   /// Enumerate each of the unhandled contexts (nominal type
@@ -418,14 +417,12 @@ class ConformanceLookupTable {
 
   /// Load all of the protocol conformances for the given (serialized)
   /// declaration context.
-  void loadAllConformances(NominalTypeDecl *nominal,
-                           DeclContext *dc,
+  void loadAllConformances(DeclContext *dc,
                            ArrayRef<ProtocolConformance *> conformances);
 
 public:
   /// Create a new conformance lookup table.
-  ConformanceLookupTable(ASTContext &ctx, NominalTypeDecl *nominal,
-                         LazyResolver *resolver);
+  ConformanceLookupTable(ASTContext &ctx, LazyResolver *resolver);
 
   /// Destroy the conformance table.
   void destroy();
@@ -435,7 +432,8 @@ public:
                                  ProtocolDecl *protocol);
 
   /// Register an externally-supplied protocol conformance.
-  void registerProtocolConformance(ProtocolConformance *conformance);
+  void registerProtocolConformance(ProtocolConformance *conformance,
+                                   bool synthesized = false);
 
   /// Look for conformances to the given protocol.
   ///

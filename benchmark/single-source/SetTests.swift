@@ -2,15 +2,26 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 import TestsUtils
+
+public let SetTests = [
+  BenchmarkInfo(name: "SetExclusiveOr", runFunction: run_SetExclusiveOr, tags: [.validation, .api, .Set]),
+  BenchmarkInfo(name: "SetExclusiveOr_OfObjects", runFunction: run_SetExclusiveOr_OfObjects, tags: [.validation, .api, .Set]),
+  BenchmarkInfo(name: "SetIntersect", runFunction: run_SetIntersect, tags: [.validation, .api, .Set]),
+  BenchmarkInfo(name: "SetIntersect_OfObjects", runFunction: run_SetIntersect_OfObjects, tags: [.validation, .api, .Set]),
+  BenchmarkInfo(name: "SetIsSubsetOf", runFunction: run_SetIsSubsetOf, tags: [.validation, .api, .Set]),
+  BenchmarkInfo(name: "SetIsSubsetOf_OfObjects", runFunction: run_SetIsSubsetOf_OfObjects, tags: [.validation, .api, .Set]),
+  BenchmarkInfo(name: "SetUnion", runFunction: run_SetUnion, tags: [.validation, .api, .Set]),
+  BenchmarkInfo(name: "SetUnion_OfObjects", runFunction: run_SetUnion_OfObjects, tags: [.validation, .api, .Set]),
+]
 
 @inline(never)
 public func run_SetIsSubsetOf(_ N: Int) {
@@ -22,8 +33,8 @@ public func run_SetIsSubsetOf(_ N: Int) {
   var otherSet = Set<Int>(minimumCapacity: size)
 
   for _ in 0 ..< size {
-    set.insert(Int(truncatingBitPattern: Random()))
-    otherSet.insert(Int(truncatingBitPattern: Random()))
+    set.insert(Int(truncatingIfNeeded: Random()))
+    otherSet.insert(Int(truncatingIfNeeded: Random()))
   }
 
   var isSubset = false
@@ -34,7 +45,7 @@ public func run_SetIsSubsetOf(_ N: Int) {
     }
   }
 
-  CheckResults(!isSubset, "Incorrect results in SetIsSubsetOf")
+  CheckResults(!isSubset)
 }
 
 @inline(never)
@@ -51,8 +62,8 @@ public func run_SetExclusiveOr(_ N: Int) {
   var otherSet = Set<Int>(minimumCapacity: size)
 
   for _ in 0 ..< size {
-    set.insert(Int(truncatingBitPattern: Random()))
-    otherSet.insert(Int(truncatingBitPattern: Random()))
+    set.insert(Int(truncatingIfNeeded: Random()))
+    otherSet.insert(Int(truncatingIfNeeded: Random()))
   }
 
   var xor = Set<Int>()
@@ -72,8 +83,8 @@ public func run_SetUnion(_ N: Int) {
   var otherSet = Set<Int>(minimumCapacity: size)
 
   for _ in 0 ..< size {
-    set.insert(Int(truncatingBitPattern: Random()))
-    otherSet.insert(Int(truncatingBitPattern: Random()))
+    set.insert(Int(truncatingIfNeeded: Random()))
+    otherSet.insert(Int(truncatingIfNeeded: Random()))
   }
 
   var or = Set<Int>()
@@ -93,8 +104,8 @@ public func run_SetIntersect(_ N: Int) {
   var otherSet = Set<Int>(minimumCapacity: size)
 
   for _ in 0 ..< size {
-    set.insert(Int(truncatingBitPattern: Random()))
-    otherSet.insert(Int(truncatingBitPattern: Random()))
+    set.insert(Int(truncatingIfNeeded: Random()))
+    otherSet.insert(Int(truncatingIfNeeded: Random()))
   }
 
   var and = Set<Int>()
@@ -115,7 +126,7 @@ class Box<T : Hashable> : Hashable {
     return value.hashValue
   }
 
-  static func ==<T: Equatable>(lhs: Box<T>, rhs: Box<T>) -> Bool {
+  static func ==(lhs: Box, rhs: Box) -> Bool {
     return lhs.value == rhs.value
   }
 }
@@ -130,8 +141,8 @@ public func run_SetIsSubsetOf_OfObjects(_ N: Int) {
   var otherSet = Set<Box<Int>>(minimumCapacity: size)
 
   for _ in 0 ..< size {
-    set.insert(Box(Int(truncatingBitPattern: Random())))
-    otherSet.insert(Box(Int(truncatingBitPattern: Random())))
+    set.insert(Box(Int(truncatingIfNeeded: Random())))
+    otherSet.insert(Box(Int(truncatingIfNeeded: Random())))
   }
 
   var isSubset = false
@@ -142,7 +153,7 @@ public func run_SetIsSubsetOf_OfObjects(_ N: Int) {
     }
   }
 
-  CheckResults(!isSubset, "Incorrect results in SetIsSubsetOf")
+  CheckResults(!isSubset)
 }
 
 @inline(never)
@@ -159,8 +170,8 @@ public func run_SetExclusiveOr_OfObjects(_ N: Int) {
   var otherSet = Set<Box<Int>>(minimumCapacity: size)
 
   for _ in 0 ..< size {
-    set.insert(Box(Int(truncatingBitPattern: Random())))
-    otherSet.insert(Box(Int(truncatingBitPattern: Random())))
+    set.insert(Box(Int(truncatingIfNeeded: Random())))
+    otherSet.insert(Box(Int(truncatingIfNeeded: Random())))
   }
 
   var xor = Set<Box<Int>>()
@@ -180,8 +191,8 @@ public func run_SetUnion_OfObjects(_ N: Int) {
   var otherSet = Set<Box<Int>>(minimumCapacity: size)
 
   for _ in 0 ..< size {
-    set.insert(Box(Int(truncatingBitPattern: Random())))
-    otherSet.insert(Box(Int(truncatingBitPattern: Random())))
+    set.insert(Box(Int(truncatingIfNeeded: Random())))
+    otherSet.insert(Box(Int(truncatingIfNeeded: Random())))
   }
 
   var or = Set<Box<Int>>()
@@ -201,8 +212,8 @@ public func run_SetIntersect_OfObjects(_ N: Int) {
   var otherSet = Set<Box<Int>>(minimumCapacity: size)
 
   for _ in 0 ..< size {
-    set.insert(Box(Int(truncatingBitPattern: Random())))
-    otherSet.insert(Box(Int(truncatingBitPattern: Random())))
+    set.insert(Box(Int(truncatingIfNeeded: Random())))
+    otherSet.insert(Box(Int(truncatingIfNeeded: Random())))
   }
 
   var and = Set<Box<Int>>()

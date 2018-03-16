@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -17,6 +17,7 @@
 #include "SourceKit/SwiftLang/Factory.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/TargetSelect.h"
 #include "gtest/gtest.h"
 
 using namespace SourceKit;
@@ -51,12 +52,14 @@ class NullEditorConsumer : public EditorConsumer {
                                  unsigned NameLength,
                                  unsigned BodyOffset,
                                  unsigned BodyLength,
+                                 unsigned DocOffset,
+                                 unsigned DocLength,
                                  StringRef DisplayName,
                                  StringRef TypeName,
                                  StringRef RuntimeName,
                                  StringRef SelectorName,
                                  ArrayRef<StringRef> InheritedTypes,
-                                 ArrayRef<UIdent> Attrs) override {
+                                 ArrayRef<std::tuple<UIdent, unsigned, unsigned>> Attrs) override {
     return false;
   }
 
@@ -85,6 +88,8 @@ class NullEditorConsumer : public EditorConsumer {
   }
 
   bool handleSourceText(StringRef Text) override { return false; }
+  bool handleSerializedSyntaxTree(StringRef Text) override { return false; }
+  bool syntaxTreeEnabled() override { return false; }
 };
 
 struct TestCursorInfo {
@@ -101,7 +106,11 @@ class CursorInfoTest : public ::testing::Test {
 public:
   LangSupport &getLang() { return Ctx.getSwiftLangSupport(); }
 
-  void SetUp() {
+  void SetUp() override {
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmPrinters();
+    llvm::InitializeAllAsmParsers();
     NumTasks = 0;
   }
 
@@ -129,8 +138,8 @@ public:
     Semaphore sema(0);
 
     TestCursorInfo TestInfo;
-    getLang().getCursorInfo(DocName, Offset, Args,
-      [&](const CursorInfo &Info) {
+    getLang().getCursorInfo(DocName, Offset, 0, false, false, Args,
+      [&](const CursorInfoData &Info) {
         TestInfo.Name = Info.Name;
         TestInfo.Typename = Info.TypeName;
         TestInfo.Filename = Info.Filename;

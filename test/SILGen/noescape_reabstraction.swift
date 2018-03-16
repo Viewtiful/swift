@@ -1,4 +1,6 @@
-// RUN: %target-swift-frontend -emit-silgen %s | %FileCheck %s
+// REQUIRES: plus_one_runtime
+
+// RUN: %target-swift-frontend -module-name noescape_reabstraction -emit-silgen -enable-sil-ownership %s | %FileCheck %s
 
 struct S {}
 
@@ -9,8 +11,8 @@ func noescape_concrete(_ x: (S) -> S) {
 func noescape_generic<T>(_ x: (T) -> T) {
 }
 
-// CHECK-LABEL: sil hidden @_TF22noescape_reabstraction17noescape_concreteFFVS_1SS0_T_
-// CHECK:         function_ref [[REABSTRACTION_THUNK:@_TTRXFo_dV22noescape_reabstraction1S_dS0__XFo_iS0__iS0__]]
+// CHECK-LABEL: sil hidden @$S22noescape_reabstraction0A9_concreteyyAA1SVADXEF
+// CHECK:         function_ref [[REABSTRACTION_THUNK:@\$S22noescape_reabstraction1SVACIgyd_A2CIegir_TR]]
 
 func concrete(_ x: (S) -> S) {
   noescape_generic(x)
@@ -19,5 +21,5 @@ func concrete(_ x: (S) -> S) {
 func generic<T>(_ x: (T) -> T) {
 }
 
-// CHECK-LABEL: sil hidden @_TF22noescape_reabstraction8concreteFFVS_1SS0_T_
+// CHECK-LABEL: sil hidden @$S22noescape_reabstraction8concreteyyAA1SVADXEF
 // CHECK:         function_ref [[REABSTRACTION_THUNK]]

@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -sdk %S/Inputs -I %S/Inputs -enable-source-import %s -emit-silgen | %FileCheck %s
+// RUN: %target-swift-frontend -sdk %S/Inputs -I %S/Inputs -enable-source-import %s -emit-silgen -enable-sil-ownership | %FileCheck %s
 
 // REQUIRES: objc_interop
 
@@ -16,11 +16,11 @@ extension NSReferencePoint: Pointable {}
 // Make sure synthesized materializeForSet and its callbacks have shared linkage
 // for properties imported from Clang
 
-// CHECK-LABEL: sil shared [transparent] [fragile] @_TFVSC7NSPointm1xSf
-// CHECK-LABEL: sil shared [transparent] [fragile] @_TFVSC7NSPointm1ySf
+// CHECK-LABEL: sil shared [transparent] [serializable] @$SSo7NSPointV1xSfvm
+// CHECK-LABEL: sil shared [transparent] [serializable] @$SSo7NSPointV1ySfvm
 
-// CHECK-LABEL: sil shared [transparent] [fragile] @_TFCSo16NSReferencePointm1xSf
-// CHECK-LABEL: sil shared [transparent] [fragile] @_TFCSo16NSReferencePointm1ySf
+// CHECK-LABEL: sil shared [serializable] @$SSo16NSReferencePointC1xSfvmytfU_
+// CHECK-LABEL: sil shared [serializable] @$SSo16NSReferencePointC1xSfvm
 
-// CHECK-LABEL: sil shared [transparent] [fragile] @_TFFCSo16NSReferencePointm1xSfU_T_
-// CHECK-LABEL: sil shared [transparent] [fragile] @_TFFCSo16NSReferencePointm1ySfU_T_
+// CHECK-LABEL: sil shared [serializable] @$SSo16NSReferencePointC1ySfvmytfU_
+// CHECK-LABEL: sil shared [serializable] @$SSo16NSReferencePointC1ySfvm

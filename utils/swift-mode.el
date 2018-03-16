@@ -2,11 +2,11 @@
 ;
 ; This source file is part of the Swift.org open source project
 ;
-; Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+; Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 ; Licensed under Apache License v2.0 with Runtime Library Exception
 ;
-; See http://swift.org/LICENSE.txt for license information
-; See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+; See https://swift.org/LICENSE.txt for license information
+; See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 ;
 ;===----------------------------------------------------------------------===;
 
@@ -19,6 +19,11 @@
      (make-local-variable 'require-final-newline) mode-require-final-newline)
     (set
      (make-local-variable 'parse-sexp-ignore-comments) t)))
+
+(unless (fboundp 'defvar-local)
+  (defmacro defvar-local (var val &optional docstring)
+    "Define VAR as a buffer-local variable with default value VAL."
+    `(make-variable-buffer-local (defvar ,var ,val ,docstring))))
 
 ;; Create mode-specific variables
 (defcustom swift-basic-offset 2
@@ -34,6 +39,8 @@
   (list
    ;; Comments
    '("^#!.*" . font-lock-comment-face)
+   ;; Variables surrounded with backticks (`)
+   '("`[a-zA-Z_][a-zA-Z_0-9]*`" . font-lock-variable-name-face)
    ;; Types
    '("\\b[A-Z][a-zA-Z_0-9]*\\b" . font-lock-type-face)
    ;; Floating point constants
@@ -43,9 +50,9 @@
    ;; Decl and type keywords
    `(,(regexp-opt '("class" "init" "deinit" "extension" "fileprivate" "func"
                     "import" "let" "protocol" "static" "struct" "subscript"
-                    "typealias" "enum" "var" "lazy" "where"
-                    "private" "public" "internal" "override" "throws" "rethrows"
-                    "open" "associatedtype" "inout" "indirect" "final")
+                    "typealias" "enum" "var" "lazy" "where" "private" "public"
+                    "internal" "override" "open" "associatedtype" "inout"
+                    "indirect" "final")
                   'words) . font-lock-keyword-face)
    ;; Variable decl keywords
    `("\\b\\(?:[^a-zA-Z_0-9]*\\)\\(get\\|set\\)\\(?:[^a-zA-Z_0-9]*\\)\\b" 1 font-lock-keyword-face)
@@ -53,7 +60,7 @@
    ;; Operators
    `("\\b\\(?:\\(?:pre\\|post\\|in\\)fix\\s-+\\)operator\\b" . font-lock-keyword-face)
    ;; Keywords that begin with a number sign
-   `("#\\(if\\|endif\\|elseif\\|else\\|available\\)\\b" . font-lock-string-face)
+   `("#\\(if\\|endif\\|elseif\\|else\\|available\\|error\\|warning\\)\\b" . font-lock-string-face)
    `("#\\(file\\|line\\|column\\|function\\|selector\\)\\b" . font-lock-keyword-face)
    ;; Infix operator attributes
    `(,(regexp-opt '("precedence" "associativity" "left" "right" "none")
@@ -61,16 +68,18 @@
    ;; Statements
    `(,(regexp-opt '("if" "guard" "in" "else" "for" "do" "repeat" "while"
                     "return" "break" "continue" "fallthrough"  "switch" "case"
-                    "default" "throw" "defer" "try" "catch")
+                    "default" "defer" "catch")
                   'words) . font-lock-keyword-face)
    ;; Decl modifier keywords
    `(,(regexp-opt '("convenience" "dynamic" "mutating" "nonmutating" "optional"
                     "required" "weak" "unowned" "safe" "unsafe")
                   'words) . font-lock-keyword-face)
+   ;; Expression keywords: "Any" and "Self" are included in "Types" above
+   `(,(regexp-opt '("as" "false" "is" "nil" "rethrows" "super" "self" "throw"
+                    "true" "try" "throws")
+                  'words) . font-lock-keyword-face)
    ;; Expressions
    `(,(regexp-opt '("new") 'words) . font-lock-keyword-face)
-   ;; Special Variables
-   '("self" . font-lock-keyword-face)
    ;; Variables
    '("[a-zA-Z_][a-zA-Z_0-9]*" . font-lock-variable-name-face)
    ;; Unnamed variables
@@ -150,7 +159,7 @@
     (defvar electric-indent-chars nil))
   (unless (boundp 'electric-pair-pairs)
     (defvar electric-pair-pairs nil))
-    
+
   (set (make-local-variable 'electric-indent-chars)
        (append "{}()[]:," electric-indent-chars))
   (set (make-local-variable 'electric-pair-pairs)
@@ -161,16 +170,16 @@
                  (?{ . ?})  (?[ . ?]) (?( . ?)) (?` . ?`)) electric-pair-pairs))
   (set (make-local-variable 'electric-layout-rules)
        '((?\{ . after) (?\} . before)))
-  
-  (set (make-local-variable 'font-lock-defaults) 
+
+  (set (make-local-variable 'font-lock-defaults)
        '(swift-font-lock-keywords) ))
 
 (defconst swift-doc-comment-detail-re
-  (let ((just-space "[ \t\n]*")
-        (not-just-space ".*?[^ \t\n].*")
+  (let* ((just-space "[ \t\n]*")
+        (not-just-space "[ \t]*[^ \t\n].*")
         (eol "\\(?:$\\)")
         (continue "\n\\1"))
-    
+
     (concat "^\\([ \t]*///\\)" not-just-space eol
             "\\(?:" continue not-just-space eol "\\)*"
             "\\(" continue just-space eol
@@ -241,7 +250,6 @@ generic-parameter-list? ( `.' identifier generic-parameter-list?
 )*, returning t if the initial identifier was found and nil otherwise."
   (when (swift-skip-identifier)
     (swift-skip-generic-parameter-list)
-    (swift-skip-re "\\?+")
     (when (swift-skip-re "\\.")
       (swift-skip-simple-type-name))
     t))
@@ -252,22 +260,38 @@ one is present, returning t if so and nil otherwise"
   (swift-skip-comments-and-space)
   (let ((found nil))
     ;; repeatedly
-    (while 
+    (while
         (and
          ;; match a tuple or an identifier + optional generic param list
          (cond
           ((looking-at "[[(]")
            (forward-sexp)
            (setq found t))
-          
+
           ((swift-skip-simple-type-name)
            (setq found t)))
-         
+
           ;; followed by "->"
-          (prog1 (swift-skip-re "throws\\|rethrows\\|->")
-            (swift-skip-re "->") ;; accounts for the throws/rethrows cases on the previous line
-            (swift-skip-comments-and-space))))
+         (prog2 (swift-skip-re "\\?+")
+             (swift-skip-re "throws\\|rethrows\\|->")
+           (swift-skip-re "->") ;; accounts for the throws/rethrows cases on the previous line
+           (swift-skip-comments-and-space))))
     found))
+
+(defun swift-skip-constraint ()
+    "Hop over a single type constraint if one is present,
+returning t if so and nil otherwise"
+  (swift-skip-comments-and-space)
+  (and (swift-skip-type-name)
+       (swift-skip-re ":\\|==")
+       (swift-skip-type-name)))
+
+(defun swift-skip-where-clause ()
+    "Hop over a where clause if one is present, returning t if so
+and nil otherwise"
+  (when (swift-skip-re "\\<where\\>")
+    (while (and (swift-skip-constraint) (swift-skip-re ",")))
+    t))
 
 (defun swift-in-string-or-comment ()
   "Return non-nil if point is in a string or comment."
@@ -293,12 +317,12 @@ Use `M-x hs-show-all' to show them again."
                ;; parse up to the opening brace
                (cond
                 ((equal keyword "deinit") t)
-                
+
                 ((equal keyword "var")
                  (and (swift-skip-identifier)
                       (swift-skip-re ":")
                       (swift-skip-type-name)))
-                
+
                 ;; otherwise, there's a parameter list
                 (t
                  (and
@@ -311,7 +335,9 @@ Use `M-x hs-show-all' to show them again."
                     (swift-skip-comments-and-space)
                     (equal (char-after) ?\())
                   ;; parse the parameter list and any return type
-                  (swift-skip-type-name)))))
+                  (prog1
+                    (swift-skip-type-name)
+                    (swift-skip-where-clause))))))
              (swift-skip-re "{"))
           (hs-hide-block :reposition-at-end))))))
 
@@ -321,7 +347,7 @@ Use `M-x hs-show-all' to show them again."
     (save-excursion
       (widen)
       (setq indent-level (car (syntax-ppss (point-at-bol))))
-      
+
       ;; Look at the first non-whitespace to see if it's a close paren
       (beginning-of-line)
       (skip-syntax-forward " ")
@@ -333,7 +359,7 @@ Use `M-x hs-show-all' to show them again."
                            1)
                           ((save-match-data
                              (looking-at
-                              "case \\|default *:\\|[a-zA-Z_][a-zA-Z0-9_]*\\(\\s-\\|\n\\)*:\\(\\s-\\|\n\\)*\\(for\\|do\\|\\while\\|switch\\)\\>"))
+                              "case \\|default *:\\|[a-zA-Z_][a-zA-Z0-9_]*\\(\\s-\\|\n\\)*:\\(\\s-\\|\n\\)*\\(for\\|do\\|\\while\\|switch\\|repeat\\)\\>"))
                            1)
                           (t 0))))))
       (indent-line-to (max target-column 0)))
@@ -350,13 +376,13 @@ Use `M-x hs-show-all' to show them again."
         ,(concat
      "^"
        "[ \t]+" "\\(?:(@\\)?"
-       "[A-Z][A-Za-z0-9_]*@" 
+       "[A-Z][A-Za-z0-9_]*@"
      ;; Filename \1
        "\\("
-          "[0-9]*[^0-9\n]" 
-          "\\(?:" 
-             "[^\n :]" "\\|" " [^/\n]" "\\|" ":[^ \n]" 
-          "\\)*?" 
+          "[0-9]*[^0-9\n]"
+          "\\(?:"
+             "[^\n :]" "\\|" " [^/\n]" "\\|" ":[^ \n]"
+          "\\)*?"
        "\\)"
        ":"
        ;; Line number (\2)
@@ -374,10 +400,10 @@ Use `M-x hs-show-all' to show them again."
        "[0-9]+[.][ \t]+While .* at \\[?"
      ;; Filename \1
        "\\("
-          "[0-9]*[^0-9\n]" 
-          "\\(?:" 
-             "[^\n :]" "\\|" " [^/\n]" "\\|" ":[^ \n]" 
-          "\\)*?" 
+          "[0-9]*[^0-9\n]"
+          "\\(?:"
+             "[^\n :]" "\\|" " [^/\n]" "\\|" ":[^ \n]"
+          "\\)*?"
        "\\)"
        ":"
        ;; Line number (\2)
@@ -394,10 +420,10 @@ Use `M-x hs-show-all' to show them again."
      "^\\(?:assertion failed\\|fatal error\\): \\(?:.*: \\)?file "
      ;; Filename \1
        "\\("
-          "[0-9]*[^0-9\n]" 
-          "\\(?:" 
-             "[^\n :]" "\\|" " [^/\n]" "\\|" ":[^ \n]" 
-          "\\)*?" 
+          "[0-9]*[^0-9\n]"
+          "\\(?:"
+             "[^\n :]" "\\|" " [^/\n]" "\\|" ":[^ \n]"
+          "\\)*?"
        "\\)"
        ", line "
        ;; Line number (\2)
@@ -414,7 +440,7 @@ Use `M-x hs-show-all' to show them again."
 (defvar-local swift-find-executable-fn 'executable-find
   "Function to find a command executable.
 The function is called with one argument, the name of the executable to find.
-Might be useful if you want to use a swiftc that you built instead 
+Might be useful if you want to use a swiftc that you built instead
 of the one in your PATH.")
 (put 'swift-find-executable-fn 'safe-local-variable 'functionp)
 
@@ -426,7 +452,7 @@ current buffer.
 Set to 'swift-syntax-check-single-file to ignore other files in the current directory.")
 (put 'swift-syntax-check-fn 'safe-local-variable 'functionp)
 
-(defvar-local swift-syntax-check-args '("-parse")
+(defvar-local swift-syntax-check-args '("-typecheck")
   "List of arguments to be passed to swiftc for syntax checking.
 Elements of this list that are strings are inserted literally
 into the command line.  Elements that are S-expressions are
@@ -442,7 +468,7 @@ that variable you should set this one to nil.")
 
 (defun swift-syntax-check-single-file (swiftc temp-file)
   "Return a flymake command-line list for syntax-checking the current buffer in isolation"
-  `(,swiftc ("-parse" ,temp-file)))
+  `(,swiftc ("-typecheck" ,temp-file)))
 
 (defun swift-syntax-check-directory (swiftc temp-file)
   "Return a flymake command-line list for syntax-checking the
@@ -453,27 +479,27 @@ directory."
       (when (and (string-equal "swift" (file-name-extension x))
                  (not (file-equal-p x (buffer-file-name))))
         (setq sources (cons x sources))))
-    `(,swiftc ("-parse" ,temp-file ,@sources))))
+    `(,swiftc ("-typecheck" ,temp-file ,@sources))))
 
 (defun flymake-swift-init ()
-  (let* ((temp-file 
+  (let* ((temp-file
           (flymake-init-create-temp-buffer-copy
-           (lambda (x y) 
-             (make-temp-file 
+           (lambda (x y)
+             (make-temp-file
               (concat (file-name-nondirectory x) "-" y)
-              (not :DIR_FLAG) 
+              (not :DIR_FLAG)
               ;; grab *all* the extensions; handles .swift.gyb files, for example
               ;; whereas using file-name-extension would only get ".gyb"
               (replace-regexp-in-string "^\\(?:.*/\\)?[^.]*" "" (buffer-file-name)))))))
-    (funcall swift-syntax-check-fn 
+    (funcall swift-syntax-check-fn
              (funcall swift-find-executable-fn "swiftc")
              temp-file)))
 
 (add-to-list 'flymake-allowed-file-name-masks '(".+\\.swift$" flymake-swift-init))
 
 (setq flymake-err-line-patterns
-      (append 
-       (flymake-reformat-err-line-patterns-from-compile-el 
+      (append
+       (flymake-reformat-err-line-patterns-from-compile-el
         (mapcar (lambda (x) (assoc x compilation-error-regexp-alist-alist))
                 '(swift0 swift1 swift-fatal)))
        flymake-err-line-patterns))

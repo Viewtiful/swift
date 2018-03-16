@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -36,6 +36,7 @@ namespace swift {
   class VarDecl;
 
 namespace irgen {
+  class ConstantStructBuilder;
   class HeapLayout;
   class IRGenFunction;
   class IRGenModule;
@@ -43,10 +44,13 @@ namespace irgen {
   class OwnedAddress;
   class Address;
   class Size;
+  class StructLayout;
+  class TypeInfo;
   
   enum class ReferenceCounting : unsigned char;
   enum class IsaEncoding : unsigned char;
   enum class ClassDeallocationKind : unsigned char;
+  enum class FieldAccess : uint8_t;
   
   OwnedAddress projectPhysicalClassMemberAddress(IRGenFunction &IGF,
                                                  llvm::Value *base,
@@ -62,10 +66,15 @@ namespace irgen {
                                        SILType baseType, VarDecl *field);
 
 
-  std::tuple<llvm::Constant * /*classData*/,
-             llvm::Constant * /*metaclassData*/,
-             Size>
-  emitClassPrivateDataFields(IRGenModule &IGM, ClassDecl *cls);
+  enum ForMetaClass_t : bool {
+    ForClass = false,
+    ForMetaClass = true
+  };
+
+  std::pair<Size,Size>
+  emitClassPrivateDataFields(IRGenModule &IGM,
+                             ConstantStructBuilder &builder,
+                             ClassDecl *cls);
   
   llvm::Constant *emitClassPrivateData(IRGenModule &IGM, ClassDecl *theClass);
   void emitGenericClassPrivateDataTemplate(IRGenModule &IGM,
@@ -86,10 +95,12 @@ namespace irgen {
   typedef llvm::ArrayRef<std::pair<SILType, llvm::Value *>> TailArraysRef;
 
   /// Adds the size for tail allocated arrays to \p size and returns the new
-  /// size value.
-  llvm::Value *appendSizeForTailAllocatedArrays(IRGenFunction &IGF,
-                                                llvm::Value *size,
-                                                TailArraysRef TailArrays);
+  /// size value. Also updades the alignment mask to represent the alignment of
+  /// the largest element.
+  std::pair<llvm::Value *, llvm::Value *>
+  appendSizeForTailAllocatedArrays(IRGenFunction &IGF,
+                                   llvm::Value *size, llvm::Value *alignMask,
+                                   TailArraysRef TailArrays);
 
   /// Emit an allocation of a class.
   /// The \p StackAllocSize is an in- and out-parameter. The passed value
@@ -126,11 +137,32 @@ namespace irgen {
   /// correspond to the runtime alignment of instances of the class.
   llvm::Constant *tryEmitClassConstantFragileInstanceAlignMask(IRGenModule &IGM,
                                                         ClassDecl *theClass);
-  
-  /// What reference counting mechanism does a class use?
-  ReferenceCounting getReferenceCountingForClass(IRGenModule &IGM,
-                                                 ClassDecl *theClass);
-  
+  /// Emit the constant fragile offset of the given property inside an instance
+  /// of the class.
+  llvm::Constant *
+  tryEmitConstantClassFragilePhysicalMemberOffset(IRGenModule &IGM,
+                                                  SILType baseType,
+                                                  VarDecl *field);
+                                                  
+  unsigned getClassFieldIndex(IRGenModule &IGM,
+                              SILType baseType,
+                              VarDecl *field);
+    
+  FieldAccess getClassFieldAccess(IRGenModule &IGM,
+                                  SILType baseType,
+                                  VarDecl *field);
+
+  /// Creates a layout for the class \p classType with allocated tail elements
+  /// \p tailTypes.
+  ///
+  /// The caller is responsible for deleting the returned StructLayout.
+  StructLayout *getClassLayoutWithTailElems(IRGenModule &IGM, SILType classType,
+                                            llvm::ArrayRef<SILType> tailTypes);
+
+  /// What reference counting mechanism does a class-like type use?
+  ReferenceCounting getReferenceCountingForType(IRGenModule &IGM,
+                                                CanType type);
+
   /// What isa-encoding mechanism does a type use?
   IsaEncoding getIsaEncodingForType(IRGenModule &IGM, CanType type);
   
@@ -141,6 +173,13 @@ namespace irgen {
   /// the runtime?
   bool doesClassMetadataRequireDynamicInitialization(IRGenModule &IGM,
                                                      ClassDecl *theClass);
+    
+  /// If the superclass came from another module, we may have dropped
+  /// stored properties due to the Swift language version availability of
+  /// their types. In these cases we can't precisely lay out the ivars in
+  /// the class object at compile time so we need to do runtime layout.
+  bool classHasIncompleteLayout(IRGenModule &IGM,
+                                ClassDecl *theClass);
 } // end namespace irgen
 } // end namespace swift
 

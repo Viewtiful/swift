@@ -1,4 +1,5 @@
-// RUN: rm -rf %t && mkdir -p %t && %gyb %s -o %t/PersistentVector.swift
+// RUN: %empty-directory(%t)
+// RUN: %gyb %s -o %t/PersistentVector.swift
 // RUN: %line-directive %t/PersistentVector.swift -- %target-build-swift -parse-stdlib %t/PersistentVector.swift -o %t/a.out
 // RUN: %line-directive %t/PersistentVector.swift -- %target-run %t/a.out
 // REQUIRES: executable_test
@@ -105,7 +106,7 @@ import SwiftShims
 
 func allocBytes(count: Int, alignment: Int)
   -> UnsafeMutableRawPointer {
-  return UnsafeMutableRawPointer.allocate(bytes: count, alignedTo: alignment)
+  return UnsafeMutableRawPointer.allocate(byteCount: count, alignment: alignment)
 }
 
 func deallocBytes(
@@ -113,7 +114,7 @@ func deallocBytes(
   byteCount: Int,
   alignment: Int
 ) {
-  pointer.deallocate(bytes: byteCount, alignedTo: alignment)
+  pointer.deallocate()
 }
 
 func _swift_stdlib_atomicStoreInt(
@@ -160,25 +161,6 @@ func _dumpRec(
   }
 }
 
-struct _Stdout : TextOutputStream {
-  mutating func _lock() {
-    _swift_stdlib_flockfile_stdout()
-  }
-
-  mutating func _unlock() {
-    _swift_stdlib_funlockfile_stdout()
-  }
-
-  mutating func write(_ string: String) {
-    // FIXME: buffering?
-    // It is important that we use stdio routines in order to correctly
-    // interoperate with stdio buffering.
-    for c in string.utf8 {
-      _swift_stdlib_putchar_unlocked(Int32(c))
-    }
-  }
-}
-
 % for (name, underlyingType) in [
 %   ('Int', 'UInt'), ('Int32', 'UInt32')
 % ]:
@@ -208,15 +190,15 @@ struct _${name}Bitmap {
 
   subscript(i: Int) -> Bool {
     get {
-      precondition(i >= 0 && i < Int(${underlyingType}._sizeInBits)) // sanity check
+      precondition(i >= 0 && i < Int(${underlyingType}.bitWidth)) // sanity check
       return _bits & (1 << ${underlyingType}(i)) != 0
     }
     set {
-      precondition(i >= 0 && i < Int(${underlyingType}._sizeInBits)) // sanity check
+      precondition(i >= 0 && i < Int(${underlyingType}.bitWidth)) // sanity check
 %   if underlyingType == 'UInt':
       let iAsUnderlyingType = UInt(bitPattern: i)
 %   elif underlyingType == 'UInt32':
-      let iAsUnderlyingType = UInt32(truncatingBitPattern: i)
+      let iAsUnderlyingType = UInt32(truncatingIfNeeded: i)
 %   end
       _bits =
         (_bits & ~(1 << iAsUnderlyingType))
@@ -225,11 +207,11 @@ struct _${name}Bitmap {
   }
 
   func countBitsSetBelow(_ i: Int) -> Int {
-    precondition(i >= 0 && i < Int(${underlyingType}._sizeInBits)) // sanity check
+    precondition(i >= 0 && i < Int(${underlyingType}.bitWidth)) // sanity check
 %   if underlyingType == 'UInt':
       let iAsUnderlyingType = UInt(bitPattern: i)
 %   elif underlyingType == 'UInt32':
-      let iAsUnderlyingType = UInt32(truncatingBitPattern: i)
+      let iAsUnderlyingType = UInt32(truncatingIfNeeded: i)
 %   end
     let lowBits = _bits & ((1 << iAsUnderlyingType) - 1)
     return _${name}Bitmap(_bits: lowBits).setBitCount
@@ -527,7 +509,7 @@ struct _PVSparseVectorNodePointer<Key : Hashable, Value>
     childNodeVector[i] = newChildNode
 
     let destPointer = childNodeVector + i + 1
-    destPointer.initialize(from: 
+    destPointer.initialize(from:
       newChildNodes + i + 1, count: childNodeCount - i - 1)
     for childNode in
       UnsafeMutableBufferPointer(
@@ -559,7 +541,7 @@ struct _PVSparseVectorNodePointer<Key : Hashable, Value>
     childNodeVector[i] = newChildNode
 
     let destPointer = childNodeVector + i + 1
-    destPointer.initialize(from: 
+    destPointer.initialize(from:
       newChildNodes + i, count: childNodeCount - i - 1)
     for childNode in
       UnsafeMutableBufferPointer(
@@ -589,7 +571,7 @@ struct _PVSparseVectorNodePointer<Key : Hashable, Value>
     keyVector[i] = newKey
 
     let destPointer = keyVector + i + 1
-    destPointer.initialize(from: 
+    destPointer.initialize(from:
       newKeys + i + 1, count: layout.keyCount - i - 1)
   }
 
@@ -613,7 +595,7 @@ struct _PVSparseVectorNodePointer<Key : Hashable, Value>
     valueVector[i] = newValue
 
     let destPointer = valueVector + i + 1
-    destPointer.initialize(from: 
+    destPointer.initialize(from:
       newValues + i + 1, count: layout.keyCount - i - 1)
   }
 
@@ -635,7 +617,7 @@ struct _PVSparseVectorNodePointer<Key : Hashable, Value>
       keyVector.initialize(from: newKeys, count: i)
 
       let destPointer = keyVector + i
-      destPointer.initialize(from: 
+      destPointer.initialize(from:
         newKeys + i + 1, count: layout.keyCount - i)
     }
     do {
@@ -643,7 +625,7 @@ struct _PVSparseVectorNodePointer<Key : Hashable, Value>
       valueVector.initialize(from: newValues, count: i)
 
       let destPointer = valueVector + i
-      destPointer.initialize(from: 
+      destPointer.initialize(from:
         newValues + i + 1, count: layout.keyCount - i)
     }
   }
@@ -666,7 +648,7 @@ struct _PVSparseVectorNodePointer<Key : Hashable, Value>
       keyVector[i] = newKey
 
       let destPointer = keyVector + i + 1
-      destPointer.initialize(from: 
+      destPointer.initialize(from:
         newKeys + i, count: layout.keyCount - i - 1)
     }
     do {
@@ -676,7 +658,7 @@ struct _PVSparseVectorNodePointer<Key : Hashable, Value>
       valueVector[i] = newValue
 
       let destPointer = valueVector + i + 1
-      destPointer.initialize(from: 
+      destPointer.initialize(from:
         newValues + i, count: layout.keyCount - i - 1)
     }
   }
@@ -1053,12 +1035,12 @@ struct _PVArrayNodePointer<Key : Hashable, Value>
       for i in keyPopulationBitmap.setBitIndices {
         (_childNodeOrKeyArray + _Self._childNodeOrKeyStride * i)
           .assumingMemoryBound(to: Key.self)
-          .deinitialize()
+          .deinitialize(count: 1)
       }
     }
     if !_isPOD(Value.self) {
       for i in keyPopulationBitmap.setBitIndices {
-        (_valueArray + i).deinitialize()
+        (_valueArray + i).deinitialize(count: 1)
       }
     }
     deallocBytes(self._nodePointer,
@@ -1134,7 +1116,7 @@ struct _PVArrayNodePointer<Key : Hashable, Value>
     precondition(!keyPopulationBitmap[i]) // sanity check
 
     (_childNodeOrKeyArray + _Self._childNodeOrKeyStride * i)
-      .initializeMemory(as: Key.self, to: key)
+      .initializeMemory(as: Key.self, repeating: key, count: 1)
     (_valueArray + i).initialize(to: value)
 
     keyPopulationBitmap[i] = true
@@ -1353,7 +1335,7 @@ struct _PVCollisionNodePointer<Key : Hashable, Value>
     valueArray[i] = newValue
 
     let destPointer = valueArray + i + 1
-    destPointer.initialize(from: 
+    destPointer.initialize(from:
       newValues + i + 1, count: layout.keyCount - i - 1)
   }
 
@@ -1410,7 +1392,7 @@ struct _PVCollisionNodePointer<Key : Hashable, Value>
         } else {
           // Create a new node.
           let newNode = _PVCollisionNodePointer(uninitializedNodeFor: layout)
-          newNode._keyArray.initialize(from: 
+          newNode._keyArray.initialize(from:
             keyArray, count: layout.keyCount)
           newNode.copyValues(
             from: valueArray,
@@ -2213,4 +2195,3 @@ PersistentVectorTests.test("removeValue(forKey:)/NoCollisionsInRootNode/1") {
 }
 
 runAllTests()
-

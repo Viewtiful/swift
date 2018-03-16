@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -16,6 +16,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Runtime/Config.h"
+
+#if SWIFT_OBJC_INTEROP
 #import <CoreFoundation/CoreFoundation.h>
 #include "../SwiftShims/CoreFoundationShims.h"
 
@@ -57,6 +60,15 @@ swift::_swift_stdlib_CFStringGetCharactersPtr(
   return CFStringGetCharactersPtr(cast(theString));
 }
 
+_swift_shims_CFIndex swift::_swift_stdlib_CFStringGetBytes(
+    _swift_shims_CFStringRef theString, _swift_shims_CFRange range,
+    _swift_shims_CFStringEncoding encoding, _swift_shims_UInt8 lossByte,
+    _swift_shims_Boolean isExternalRepresentation, _swift_shims_UInt8 *buffer,
+    _swift_shims_CFIndex maxBufLen, _swift_shims_CFIndex *usedBufLen) {
+  return CFStringGetBytes(cast(theString), cast(range), encoding, lossByte,
+                          isExternalRepresentation, buffer, maxBufLen, usedBufLen);
+}
+
 _swift_shims_CFIndex
 swift::_swift_stdlib_CFStringGetLength(_swift_shims_CFStringRef theString) {
   return CFStringGetLength(cast(theString));
@@ -82,33 +94,25 @@ swift::_swift_stdlib_CFStringCreateCopy(_swift_shims_CFAllocatorRef alloc,
   return cast(CFStringCreateCopy(cast(alloc), cast(theString)));
 }
 
+_swift_shims_CFStringRef
+swift::_swift_stdlib_CFStringCreateWithBytes(
+    _swift_shims_CFAllocatorRef _Nullable alloc, const uint8_t *bytes,
+    _swift_shims_CFIndex numBytes, _swift_shims_CFStringEncoding encoding,
+    _swift_shims_Boolean isExternalRepresentation) {
+  return cast(CFStringCreateWithBytes(cast(alloc), bytes, numBytes,
+                                      cast(encoding),
+                                      isExternalRepresentation));
+}
+
 const char *
 swift::_swift_stdlib_CFStringGetCStringPtr(_swift_shims_CFStringRef theString,
                             _swift_shims_CFStringEncoding encoding) {
   return CFStringGetCStringPtr(cast(theString), cast(encoding));
 }
 
-_swift_shims_CFComparisonResult
-swift::_swift_stdlib_CFStringCompare(_swift_shims_CFStringRef theString1,
-                                     _swift_shims_CFStringRef theString2,
-                            _swift_shims_CFStringCompareFlags compareOptions) {
-  return cast(CFStringCompare(cast(theString1), cast(theString2),
-                              cast(compareOptions)));
-}
-
-_swift_shims_Boolean
-swift::_swift_stdlib_CFStringFindWithOptions(
-                                      _swift_shims_CFStringRef theString,
-                                      _swift_shims_CFStringRef stringToFind,
-                                      _swift_shims_CFRange rangeToSearch,
-                                      _swift_shims_CFStringCompareFlags searchOptions,
-                                      _swift_shims_CFRange *result) {
-  return CFStringFindWithOptions(cast(theString), cast(stringToFind),
-                                 cast(rangeToSearch), cast(searchOptions),
-                                 cast(result));
-}
-
 _swift_shims_CFStringRef
 swift::_swift_stdlib_objcDebugDescription(id _Nonnull nsObject) {
   return [nsObject debugDescription];
 }
+#endif
+

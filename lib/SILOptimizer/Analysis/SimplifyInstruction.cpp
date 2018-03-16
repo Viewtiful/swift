@@ -2,20 +2,21 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "sil-simplify"
 #include "swift/SILOptimizer/Analysis/SimplifyInstruction.h"
-#include "swift/SILOptimizer/Analysis/ValueTracking.h"
-#include "swift/SILOptimizer/Utils/Local.h"
+#include "swift/SIL/InstructionUtils.h"
 #include "swift/SIL/PatternMatch.h"
 #include "swift/SIL/SILVisitor.h"
+#include "swift/SILOptimizer/Analysis/ValueTracking.h"
+#include "swift/SILOptimizer/Utils/Local.h"
 
 using namespace swift;
 using namespace swift::PatternMatch;
@@ -54,6 +55,7 @@ namespace {
     visitUncheckedTrivialBitCastInst(UncheckedTrivialBitCastInst *UTBCI);
     SILValue visitThinFunctionToPointerInst(ThinFunctionToPointerInst *TFTPI);
     SILValue visitPointerToThinFunctionInst(PointerToThinFunctionInst *PTTFI);
+    SILValue visitBeginAccessInst(BeginAccessInst *BAI);
 
     SILValue simplifyOverflowBuiltin(BuiltinInst *BI);
   };
@@ -131,13 +133,13 @@ SILValue InstSimplifier::visitTupleInst(TupleInst *TI) {
 
 SILValue InstSimplifier::visitTupleExtractInst(TupleExtractInst *TEI) {
   // tuple_extract(tuple(x, y), 0) -> x
-  if (TupleInst *TheTuple = dyn_cast<TupleInst>(TEI->getOperand()))
+  if (auto *TheTuple = dyn_cast<TupleInst>(TEI->getOperand()))
     return TheTuple->getElement(TEI->getFieldNo());
 
   // tuple_extract(apply([add|sub|...]overflow(x,y)),  0) -> x
   // tuple_extract(apply(checked_trunc(ext(x))), 0) -> x
   if (TEI->getFieldNo() == 0)
-    if (BuiltinInst *BI = dyn_cast<BuiltinInst>(TEI->getOperand()))
+    if (auto *BI = dyn_cast<BuiltinInst>(TEI->getOperand()))
       return simplifyOverflowBuiltin(BI);
 
   return SILValue();
@@ -145,7 +147,7 @@ SILValue InstSimplifier::visitTupleExtractInst(TupleExtractInst *TEI) {
 
 SILValue InstSimplifier::visitStructExtractInst(StructExtractInst *SEI) {
   // struct_extract(struct(x, y), x) -> x
-  if (StructInst *Struct = dyn_cast<StructInst>(SEI->getOperand()))
+  if (auto *Struct = dyn_cast<StructInst>(SEI->getOperand()))
     return Struct->getFieldValue(SEI->getField());
 
   return SILValue();
@@ -155,7 +157,7 @@ SILValue
 InstSimplifier::
 visitUncheckedEnumDataInst(UncheckedEnumDataInst *UEDI) {
   // (unchecked_enum_data (enum payload)) -> payload
-  if (EnumInst *EI = dyn_cast<EnumInst>(UEDI->getOperand())) {
+  if (auto *EI = dyn_cast<EnumInst>(UEDI->getOperand())) {
     if (EI->getElement() != UEDI->getElement())
       return SILValue();
 
@@ -167,9 +169,9 @@ visitUncheckedEnumDataInst(UncheckedEnumDataInst *UEDI) {
   return SILValue();
 }
 
-// Simplify
-//   %1 = unchecked_enum_data %0 : $Optional<C>, #Optional.Some!enumelt.1 // user: %27
-//   %2 = enum $Optional<C>, #Optional.Some!enumelt.1, %1 : $C // user: %28
+// Simplify:
+//   %1 = unchecked_enum_data %0 : $Optional<C>, #Optional.Some!enumelt.1
+//   %2 = enum $Optional<C>, #Optional.Some!enumelt.1, %1 : $C
 // to %0 since we are building the same enum.
 static SILValue simplifyEnumFromUncheckedEnumData(EnumInst *EI) {
   assert(EI->hasOperand() && "Expected an enum with an operand!");
@@ -230,8 +232,8 @@ SILValue InstSimplifier::visitEnumInst(EnumInst *EI) {
     SILBasicBlock *EnumBlock = EI->getParent();
     if (EnumArg->getParent() != EnumBlock)
       return SILValue();
-    
-    auto *Pred = EnumBlock->getSinglePredecessor();
+
+    auto *Pred = EnumBlock->getSinglePredecessorBlock();
     if (!Pred)
       return SILValue();
 
@@ -257,7 +259,7 @@ SILValue InstSimplifier::visitEnumInst(EnumInst *EI) {
   //
   // we'll return %0
   auto *BB = EI->getParent();
-  auto *Pred = BB->getSinglePredecessor();
+  auto *Pred = BB->getSinglePredecessorBlock();
   if (!Pred)
     return SILValue();
 
@@ -451,6 +453,16 @@ SILValue InstSimplifier::visitPointerToThinFunctionInst(PointerToThinFunctionIns
   return SILValue();
 }
 
+SILValue InstSimplifier::visitBeginAccessInst(BeginAccessInst *BAI) {
+  // Remove "dead" begin_access.
+  if (llvm::all_of(BAI->getUses(), [](Operand *operand) -> bool {
+        return isIncidentalUse(operand->getUser());
+      })) {
+    return BAI->getOperand();
+  }
+  return SILValue();
+}
+
 static SILValue simplifyBuiltin(BuiltinInst *BI) {
   const IntrinsicInfo &Intrinsic = BI->getIntrinsicInfo();
 
@@ -477,9 +489,21 @@ static SILValue simplifyBuiltin(BuiltinInst *BI) {
   switch (Builtin.ID) {
   default: break;
 
+  case BuiltinValueKind::ZExtOrBitCast:
+  case BuiltinValueKind::SExtOrBitCast: {
+    const SILValue &Op = Args[0];
+    // [s|z]extOrBitCast_N_N(x) -> x
+    if (Op->getType() == BI->getType())
+      return Op;
+  }
+  break;
+
   case BuiltinValueKind::TruncOrBitCast: {
     const SILValue &Op = Args[0];
     SILValue Result;
+    // truncOrBitCast_N_N(x) -> x
+    if (Op->getType() == BI->getType())
+      return Op;
     // trunc(extOrBitCast(x)) -> x
     if (match(Op, m_ExtOrBitCast(m_SILValue(Result)))) {
       // Truncated back to the same bits we started with.
@@ -524,6 +548,17 @@ static SILValue simplifyBuiltin(BuiltinInst *BI) {
         return val3;
     }
   }
+  break;
+  case BuiltinValueKind::Shl:
+  case BuiltinValueKind::AShr:
+  case BuiltinValueKind::LShr:
+    auto *RHS = dyn_cast<IntegerLiteralInst>(Args[1]);
+    if (RHS && !RHS->getValue()) {
+      // Shifting a value by 0 bits is equivalent to the value itself.
+      auto LHS = Args[0];
+      return LHS;
+    }
+    break;
   }
   return SILValue();
 }
@@ -547,8 +582,8 @@ static SILValue simplifyBinaryWithOverflow(BuiltinInst *BI,
   const SILValue &Op1 = Args[0];
   const SILValue &Op2 = Args[1];
 
-  IntegerLiteralInst *IntOp1 = dyn_cast<IntegerLiteralInst>(Op1);
-  IntegerLiteralInst *IntOp2 = dyn_cast<IntegerLiteralInst>(Op2);
+  auto *IntOp1 = dyn_cast<IntegerLiteralInst>(Op1);
+  auto *IntOp2 = dyn_cast<IntegerLiteralInst>(Op2);
 
   // If both ops are not constants, we cannot do anything.
   // FIXME: Add cases where we can do something, eg, (x - x) -> 0
@@ -673,6 +708,34 @@ case BuiltinValueKind::id:
 ///
 SILValue swift::simplifyInstruction(SILInstruction *I) {
   return InstSimplifier().visit(I);
+}
+
+/// Replace an instruction with a simplified result, including any debug uses,
+/// and erase the instruction. If the instruction initiates a scope, do not
+/// replace the end of its scope; it will be deleted along with its parent.
+void swift::replaceAllSimplifiedUsesAndErase(
+    SILInstruction *I, SILValue result,
+    std::function<void(SILInstruction *)> eraseNotify) {
+
+  auto *SVI = cast<SingleValueInstruction>(I);
+  assert(SVI != result && "Cannot RAUW a value with itself");
+
+  // Only SingleValueInstructions are currently simplified.
+  while (!SVI->use_empty()) {
+    Operand *use = *SVI->use_begin();
+    SILInstruction *user = use->getUser();
+    // Erase the end of scope marker.
+    if (isEndOfScopeMarker(user)) {
+      if (eraseNotify)
+        eraseNotify(user);
+      user->eraseFromParent();
+      continue;
+    }
+    use->set(result);
+  }
+  I->eraseFromParent();
+  if (eraseNotify)
+    eraseNotify(I);
 }
 
 /// Simplify invocations of builtin operations that may overflow.

@@ -1,53 +1,73 @@
+cmake_minimum_required(VERSION 3.4.3)
+include("../../../../cmake/modules/StandaloneOverlay.cmake")
+
 add_swift_library(swiftFoundation ${SWIFT_SDK_OVERLAY_LIBRARY_BUILD_TYPES} IS_SDK_OVERLAY
-  Foundation.swift.gyb
-  Boxing.swift
-  NSError.swift
-  NSStringAPI.swift
-  NSValue.swift.gyb
-  ExtraStringAPIs.swift
-  ReferenceConvertible.swift
   AffineTransform.swift
+  Boxing.swift
   Calendar.swift
-  TimeZone.swift
-  Locale.swift
   CharacterSet.swift
+  Codable.swift
+  Data.swift
+  DataThunks.m
   Date.swift
   DateComponents.swift
   DateInterval.swift
-  Data.swift
-  DataThunks.m
   Decimal.swift
+  ExtraStringAPIs.swift
   FileManager.swift
-  FileManagerThunks.m
+  Foundation.swift
   IndexPath.swift
   IndexSet.swift
-  IndexSetThunks.m
+  JSONEncoder.swift
+  Locale.swift
   Measurement.swift
   Notification.swift
+  NSArray.swift
+  NSCoder.swift
+  NSDate.swift
+  NSDictionary.swift
+  NSError.swift
+  NSExpression.swift
+  NSFastEnumeration.swift
+  NSGeometry.swift
+  NSIndexSet.swift
+  NSItemProvider.swift
+  NSNumber.swift
+  NSObject.swift
+  NSPredicate.swift
+  NSRange.swift
+  NSSet.swift
+  NSSortDescriptor.swift
+  NSString.swift
+  NSStringAPI.swift
   NSStringEncodings.swift
+  NSTextCheckingResult.swift
+  NSUndoManager.swift
+  NSURL.swift
+  NSValue.swift.gyb
   PersonNameComponents.swift
-  TypePreservingNSNumber.mm
+  PlistEncoder.swift
+  Progress.swift
+  ReferenceConvertible.swift
+  String.swift
+  TimeZone.swift
   URL.swift
   URLComponents.swift
   URLRequest.swift
   UUID.swift
-  Hashing.swift
-  Hashing.m
-  Thunks.mm
+  CheckClass.mm
 
-  SWIFT_COMPILE_FLAGS "${SWIFT_RUNTIME_SWIFT_COMPILE_FLAGS}"
+  SWIFT_COMPILE_FLAGS "${SWIFT_RUNTIME_SWIFT_COMPILE_FLAGS}" "-Xllvm" "-sil-inline-generics" "-Xllvm" "-sil-partial-specialization" "-swift-version" "3"
   LINK_FLAGS "${SWIFT_RUNTIME_SWIFT_LINK_FLAGS}"
 
-  SWIFT_MODULE_DEPENDS_OSX Darwin CoreGraphics Dispatch IOKit ObjectiveC # auto-updated
-  # CoreGraphics is used by the overlay but not by the Foundation
-  # framework, so we need to add it as a dependency.
-  # The ./utils/find-overlay-dependencies.sh tool only touches the
-  # OSX|IOS|TVOS|WATCHOS lines, so the standalone CoreGraphics lines remain.
-  SWIFT_MODULE_DEPENDS_IOS Darwin Dispatch ObjectiveC # auto-updated
-    CoreGraphics
-  SWIFT_MODULE_DEPENDS_TVOS Darwin Dispatch ObjectiveC # auto-updated
-    CoreGraphics
-  SWIFT_MODULE_DEPENDS_WATCHOS Darwin Dispatch ObjectiveC # auto-updated
-    CoreGraphics
+  SWIFT_MODULE_DEPENDS_OSX Darwin CoreFoundation CoreGraphics Dispatch IOKit ObjectiveC # auto-updated
+  SWIFT_MODULE_DEPENDS_IOS Darwin CoreFoundation CoreGraphics Dispatch ObjectiveC # auto-updated
+  SWIFT_MODULE_DEPENDS_TVOS Darwin CoreFoundation CoreGraphics Dispatch ObjectiveC # auto-updated
+  SWIFT_MODULE_DEPENDS_WATCHOS Darwin CoreFoundation CoreGraphics Dispatch ObjectiveC # auto-updated
   FRAMEWORK_DEPENDS Foundation
+
+  DEPLOYMENT_VERSION_OSX ${SWIFTLIB_DEPLOYMENT_VERSION_FOUNDATION_OSX}
+  DEPLOYMENT_VERSION_IOS ${SWIFTLIB_DEPLOYMENT_VERSION_FOUNDATION_IOS}
+  DEPLOYMENT_VERSION_TVOS ${SWIFTLIB_DEPLOYMENT_VERSION_FOUNDATION_TVOS}
+  DEPLOYMENT_VERSION_WATCHOS ${SWIFTLIB_DEPLOYMENT_VERSION_FOUNDATION_WATCHOS}
 )

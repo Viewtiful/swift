@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -30,7 +30,7 @@ enum IsTake_t : bool { IsNotTake, IsTake };
 enum IsInitialization_t : bool { IsNotInitialization, IsInitialization };
 
 /// The behavior of a dynamic cast operation on the source value.
-enum class CastConsumptionKind : unsigned char {
+enum class CastConsumptionKind : uint8_t {
   /// The source value is always taken, regardless of whether the cast
   /// succeeds.  That is, if the cast fails, the source value is
   /// destroyed.
@@ -55,6 +55,6 @@ inline IsTake_t shouldTakeOnSuccess(CastConsumptionKind kind) {
   return IsTake_t(kind != CastConsumptionKind::CopyOnSuccess);
 }
 
-}  // end namespace swift
+} // end namespace swift
 
 #endif

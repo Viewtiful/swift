@@ -1,24 +1,21 @@
-// RUN: rm -rf %t
-// RUN: mkdir -p %t
-// RUN: %target-swift-frontend -emit-module %S/Inputs/linker_pass_input.swift -o %t/Swift.swiftmodule -parse-stdlib -parse-as-library -module-name Swift -sil-serialize-all -module-link-name swiftCore
+// RUN: %empty-directory(%t)
+// RUN: %target-swift-frontend -emit-module %S/Inputs/linker_pass_input.swift -o %t/Swift.swiftmodule -parse-stdlib -parse-as-library -module-name Swift -module-link-name swiftCore
 // RUN: %target-swift-frontend %s -O -I %t -sil-debug-serialization -o - -emit-sil | %FileCheck %s
 
-// CHECK: sil public_external [fragile] @_TFs11doSomethingFT_T_ : $@convention(thin) () -> () {
+// CHECK: sil public_external [serialized] [canonical] @$Ss11doSomethingyyF : $@convention(thin) () -> () {
 doSomething()
 
-// Make sure we are not linking doSomething2 because it is marked with 'noimport'
-
-// CHECK: sil [_semantics "stdlib_binary_only"] @_TFs12doSomething2FT_T_ : $@convention(thin) () -> ()
+// CHECK: sil @$Ss12doSomething2yyF : $@convention(thin) () -> ()
 // CHECK-NOT: return
 doSomething2()
 
-// CHECK: sil public_external [fragile] [noinline] @{{.*}}callDoSomething3{{.*}}
+// CHECK: sil public_external [serialized] [noinline] [canonical] @$Ss16callDoSomething3yyF
 
-// CHECK: sil @unknown
+// CHECK: sil [canonical] @unknown
 
-// CHECK: sil [fragile] [noinline] [_semantics "stdlib_binary_only"] @{{.*}}doSomething3{{.*}}
+// CHECK: sil [canonical] @$Ss1AVABycfC
+
+// CHECK: sil [noinline] [canonical] @$Ss12doSomething3yyxlF
 // CHECK-NOT: return
-
-// CHECK: sil {{.*}} @_TFVs1AC
 
 callDoSomething3()

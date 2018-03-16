@@ -1,5 +1,5 @@
 // This file should not have any syntax or type checker errors.
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 // RUN: %target-swift-ide-test -print-ast-typechecked -source-filename %s -function-definitions=true -prefer-type-repr=false > %t.printed.txt
 // RUN: %FileCheck %s -strict-whitespace < %t.printed.txt
@@ -228,6 +228,28 @@ class InClassSubscript3 {
     }
   }
 // CHECK: {{^}}  subscript(i: Int) -> Int {{{$}}
+// CHECK-NEXT: {{^}}    get {{{$}}
+// CHECK-NEXT: {{^}}      return {{$}}
+// CHECK-NEXT: {{^}}    }{{$}}
+// CHECK: {{^}}    set(foo) {{{$}}
+// CHECK-NEXT: {{^}}      if  {{{$}}
+// CHECK-NEXT: {{^}}      }{{$}}
+// CHECK-NEXT: {{^}}    }{{$}}
+// CHECK-NEXT: {{^}}  }{{$}}
+// CHECK-NOT: subscript
+}
+
+class InClassSubscript4 {
+// CHECK-LABEL: InClassSubscript4
+  subscript<T>(i: T) -> T where T: Equatable {
+    get {
+      return i
+    }
+    set(foo) {
+      if true {}
+    }
+  }
+// CHECK: {{^}}  subscript<T>(i: T) -> T where T : Equatable {{{$}}
 // CHECK-NEXT: {{^}}    get {{{$}}
 // CHECK-NEXT: {{^}}      return {{$}}
 // CHECK-NEXT: {{^}}    }{{$}}

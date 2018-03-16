@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -65,12 +65,9 @@ class EnumInfo {
 public:
   EnumInfo() = default;
 
-  // TODO: wean ourselves off of the ASTContext, we just want a slab that will
-  // outlive us to store our strings on.
-  EnumInfo(ASTContext &ctx, const clang::EnumDecl *decl,
-           clang::Preprocessor &pp) {
-    classifyEnum(ctx, decl, pp);
-    determineConstantNamePrefix(ctx, decl);
+  EnumInfo(const clang::EnumDecl *decl, clang::Preprocessor &pp) {
+    classifyEnum(decl, pp);
+    determineConstantNamePrefix(decl);
   }
 
   EnumKind getKind() const { return kind; }
@@ -89,15 +86,13 @@ public:
   }
 
 private:
-  void determineConstantNamePrefix(ASTContext &ctx, const clang::EnumDecl *);
-  void classifyEnum(ASTContext &ctx, const clang::EnumDecl *,
-                    clang::Preprocessor &);
+  void determineConstantNamePrefix(const clang::EnumDecl *);
+  void classifyEnum(const clang::EnumDecl *, clang::Preprocessor &);
 };
 
 /// Provide a cache of enum infos, so that we don't have to re-calculate their
 /// information.
 class EnumInfoCache {
-  ASTContext &swiftCtx;
   clang::Preprocessor &clangPP;
 
   llvm::DenseMap<const clang::EnumDecl *, EnumInfo> enumInfos;
@@ -107,8 +102,7 @@ class EnumInfoCache {
   EnumInfoCache &operator = (const EnumInfoCache &) = delete;
 
 public:
-  EnumInfoCache(ASTContext &swiftContext, clang::Preprocessor &cpp)
-      : swiftCtx(swiftContext), clangPP(cpp) {}
+  explicit EnumInfoCache(clang::Preprocessor &cpp) : clangPP(cpp) {}
 
   EnumInfo getEnumInfo(const clang::EnumDecl *decl);
 

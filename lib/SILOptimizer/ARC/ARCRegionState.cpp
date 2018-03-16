@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -170,15 +170,20 @@ static bool isARCSignificantTerminator(TermInst *TI) {
   // against the operand or can use the value in some way.
   case TermKind::ThrowInst:
   case TermKind::ReturnInst:
+  case TermKind::UnwindInst:
+  case TermKind::YieldInst:
   case TermKind::TryApplyInst:
   case TermKind::SwitchValueInst:
   case TermKind::SwitchEnumInst:
   case TermKind::SwitchEnumAddrInst:
   case TermKind::DynamicMethodBranchInst:
   case TermKind::CheckedCastBranchInst:
+  case TermKind::CheckedCastValueBranchInst:
   case TermKind::CheckedCastAddrBranchInst:
     return true;
   }
+
+  llvm_unreachable("Unhandled TermKind in switch.");
 }
 
 // Visit each one of our predecessor regions and see if any are blocks that can
@@ -413,7 +418,7 @@ bool ARCRegionState::processBlockTopDown(
   // anything, we will still pair the retain, releases and then the guaranteed
   // parameter will ensure it is known safe to remove them.
   if (BB.isEntry()) {
-    auto Args = BB.getBBArgs();
+    auto Args = BB.getArguments();
     for (unsigned i = 0, e = Args.size(); i != e; ++i) {
       DataflowVisitor.visit(Args[i]);
     }
@@ -513,9 +518,9 @@ bool ARCRegionState::processTopDown(
 
 static bool isStrongEntranceInstruction(const SILInstruction &I) {
   switch (I.getKind()) {
-  case ValueKind::AllocRefInst:
-  case ValueKind::AllocRefDynamicInst:
-  case ValueKind::AllocBoxInst:
+  case SILInstructionKind::AllocRefInst:
+  case SILInstructionKind::AllocRefDynamicInst:
+  case SILInstructionKind::AllocBoxInst:
     return true;
   default:
     return false;

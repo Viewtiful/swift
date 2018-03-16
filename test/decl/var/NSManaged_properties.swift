@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -parse %s -verify
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -typecheck %s -verify
 
 // REQUIRES: objc_interop
 
@@ -8,7 +8,7 @@ class X : NSObject {
   func foo() -> X { return self }
 }
 
-@NSManaged struct SomeStruct {} // expected-error {{@NSManaged cannot be applied to this declaration}}
+@NSManaged struct SomeStruct {} // expected-error {{'@NSManaged' attribute cannot be applied to this declaration}}
 
 @NSManaged var global: Int // expected-error {{@NSManaged only allowed on an instance property or method}}
 
@@ -39,6 +39,7 @@ class SwiftGizmo : A {
   @NSManaged var nonobjc_var: SwiftProto?
 
   @NSManaged class var d: Int = 4  // expected-error {{@NSManaged only allowed on an instance property or method}}
+  // expected-error@-1 {{class stored properties not supported in classes; did you mean 'static'?}}
 
   @NSManaged var e: Int { return 4 } // expected-error {{@NSManaged not allowed on computed properties}}
 

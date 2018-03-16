@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -53,6 +53,7 @@ void ConstraintLocator::Profile(llvm::FoldingSetNodeID &id, Expr *anchor,
     case ApplyFunction:
     case FunctionArgument:
     case FunctionResult:
+    case OptionalPayload:
     case Member:
     case MemberRefBase:
     case UnresolvedMember:
@@ -70,11 +71,15 @@ void ConstraintLocator::Profile(llvm::FoldingSetNodeID &id, Expr *anchor,
     case ScalarToTuple:
     case Load:
     case GenericArgument:
-    case InterpolationArgument:
     case NamedTupleElement:
     case TupleElement:
     case ApplyArgToParam:
     case OpenedGeneric:
+    case KeyPathComponent:
+    case ConditionalRequirement:
+    case TypeParameterRequirement:
+    case ImplicitlyUnwrappedDisjunctionChoice:
+    case DynamicLookupResult:
       if (unsigned numValues = numNumericValuesInPathElement(elt.getKind())) {
         id.AddInteger(elt.getValue());
         if (numValues > 1)
@@ -131,6 +136,10 @@ void ConstraintLocator::dump(SourceManager *sm, raw_ostream &out) {
       out << "apply function";
       break;
 
+    case OptionalPayload:
+      out << "optional payload";
+      break;
+
     case ApplyArgToParam:
       out << "comparing call argument #" << llvm::utostr(elt.getValue())
           << " to parameter #" << llvm::utostr(elt.getValue2());
@@ -162,10 +171,6 @@ void ConstraintLocator::dump(SourceManager *sm, raw_ostream &out) {
 
     case InstanceType:
       out << "instance type";
-      break;
-
-    case InterpolationArgument:
-      out << "interpolation argument #" << llvm::utostr(elt.getValue());
       break;
 
     case Load:
@@ -220,6 +225,10 @@ void ConstraintLocator::dump(SourceManager *sm, raw_ostream &out) {
       out << "tuple element #" << llvm::utostr(elt.getValue());
       break;
 
+    case KeyPathComponent:
+      out << "key path component #" << llvm::utostr(elt.getValue());
+      break;
+
     case Requirement:
       out << "requirement ";
       elt.getRequirement()->dumpRef(out);
@@ -232,6 +241,22 @@ void ConstraintLocator::dump(SourceManager *sm, raw_ostream &out) {
         
     case OpenedGeneric:
       out << "opened generic";
+      break;
+
+    case ConditionalRequirement:
+      out << "conditional requirement #" << llvm::utostr(elt.getValue());
+      break;
+
+    case TypeParameterRequirement:
+      out << "type parameter requirement #" << llvm::utostr(elt.getValue());
+      break;
+
+    case ImplicitlyUnwrappedDisjunctionChoice:
+      out << "implictly unwrapped disjunction choice";
+      break;
+
+    case DynamicLookupResult:
+      out << "dynamic lookup result";
       break;
     }
   }

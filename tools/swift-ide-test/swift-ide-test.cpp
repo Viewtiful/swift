@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -17,15 +17,13 @@
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/Comment.h"
 #include "swift/AST/DebuggerClient.h"
+#include "swift/AST/DiagnosticConsumer.h"
 #include "swift/AST/DiagnosticEngine.h"
-#include "swift/AST/Mangle.h"
+#include "swift/AST/ASTMangler.h"
 #include "swift/AST/PrintOptions.h"
 #include "swift/AST/RawComment.h"
-#include "swift/AST/SourceEntityWalker.h"
 #include "swift/AST/USRGeneration.h"
-#include "swift/Basic/Demangle.h"
-#include "swift/Basic/DemangleWrappers.h"
-#include "swift/Basic/DiagnosticConsumer.h"
+#include "swift/Demangling/Demangle.h"
 #include "swift/Basic/LangOptions.h"
 #include "swift/Basic/PrimitiveParsing.h"
 #include "swift/Basic/LLVMInitialize.h"
@@ -36,8 +34,10 @@
 #include "swift/IDE/CommentConversion.h"
 #include "swift/IDE/ModuleInterfacePrinting.h"
 #include "swift/IDE/REPLCodeCompletion.h"
+#include "swift/IDE/SourceEntityWalker.h"
 #include "swift/IDE/SyntaxModel.h"
 #include "swift/IDE/Utils.h"
+#include "swift/Index/Index.h"
 #include "swift/Sema/IDETypeChecking.h"
 #include "swift/Markup/Markup.h"
 #include "swift/Config.h"
@@ -62,6 +62,7 @@
 
 using namespace swift;
 using namespace ide;
+using namespace index;
 
 namespace {
 
@@ -90,11 +91,13 @@ enum class ActionType {
   PrintUSRs,
   PrintLocalTypes,
   PrintTypeInterface,
+  PrintIndexedSymbols,
   TestCreateCompilerInvocation,
   CompilerInvocationFromModule,
   GenerateModuleAPIDescription,
   DiffModuleAPI,
   ReconstructType,
+  Range,
 };
 
 class NullDebuggerClient : public DebuggerClient {
@@ -105,13 +108,13 @@ public:
     return false;
   }
   void didGlobalize(Decl *D) override {}
-  bool lookupOverrides(Identifier Name, DeclContext *DC,
+  bool lookupOverrides(DeclBaseName Name, DeclContext *DC,
                        SourceLoc Loc, bool IsTypeLookup,
                        ResultVector &RV) override {
     return false;
   }
 
-  bool lookupAdditions(Identifier Name, DeclContext *DC,
+  bool lookupAdditions(DeclBaseName Name, DeclContext *DC,
                        SourceLoc Loc, bool IsTypeLookup,
                        ResultVector &RV) override {
     return false;
@@ -139,8 +142,11 @@ public:
 
 namespace options {
 
+static llvm::cl::OptionCategory Category("swift-ide-test Options");
+
 static llvm::cl::opt<ActionType>
 Action(llvm::cl::desc("Mode:"), llvm::cl::init(ActionType::None),
+       llvm::cl::cat(Category),
        llvm::cl::values(
            clEnumValN(ActionType::CodeCompletion,
                       "code-completion", "Perform code completion"),
@@ -208,150 +214,216 @@ Action(llvm::cl::desc("Mode:"), llvm::cl::init(ActionType::None),
            clEnumValN(ActionType::PrintModuleGroups,
                       "print-module-groups",
                       "Print group names in a module"),
-           clEnumValEnd));
+           clEnumValN(ActionType::Range,
+                      "range",
+                      "Print information about a given range"),
+           clEnumValN(ActionType::PrintIndexedSymbols,
+                      "print-indexed-symbols",
+                      "Print indexed symbol information")));
 
 static llvm::cl::opt<std::string>
-SourceFilename("source-filename", llvm::cl::desc("Name of the source file"));
+SourceFilename("source-filename", llvm::cl::desc("Name of the source file"),
+               llvm::cl::cat(Category));
 
 static llvm::cl::opt<std::string>
-SecondSourceFilename("second-source-filename", llvm::cl::desc("Name of the second source file"));
+SecondSourceFilename("second-source-filename",
+                     llvm::cl::desc("Name of the second source file"),
+                     llvm::cl::cat(Category));
 
 static llvm::cl::list<std::string>
 InputFilenames(llvm::cl::Positional, llvm::cl::desc("[input files...]"),
-               llvm::cl::ZeroOrMore);
+               llvm::cl::ZeroOrMore, llvm::cl::cat(Category));
 
 static llvm::cl::list<std::string>
-BuildConfigs("D", llvm::cl::desc("Conditional compilation flags"));
+BuildConfigs("D", llvm::cl::desc("Conditional compilation flags"),
+             llvm::cl::cat(Category));
 
 static llvm::cl::opt<std::string>
-SDK("sdk", llvm::cl::desc("path to the SDK to build against"));
+SDK("sdk", llvm::cl::desc("path to the SDK to build against"),
+    llvm::cl::cat(Category));
 
 static llvm::cl::opt<std::string>
-Triple("target", llvm::cl::desc("target triple"));
+Triple("target", llvm::cl::desc("target triple"), llvm::cl::cat(Category));
+
+static llvm::cl::list<std::string>
+SwiftVersion("swift-version", llvm::cl::desc("Swift version"),
+             llvm::cl::cat(Category));
 
 static llvm::cl::opt<std::string>
-SwiftVersion("swift-version", llvm::cl::desc("Swift version"));
+ModuleCachePath("module-cache-path", llvm::cl::desc("Clang module cache path"),
+                llvm::cl::cat(Category));
 
 static llvm::cl::opt<std::string>
-ModuleCachePath("module-cache-path", llvm::cl::desc("Clang module cache path"));
+PCHOutputDir("pch-output-dir",
+             llvm::cl::desc("place autogenerated PCH files in this directory"),
+             llvm::cl::cat(Category));
+
 
 static llvm::cl::opt<std::string>
     CompletionCachePath("completion-cache-path",
                         llvm::cl::desc("Code completion cache path"),
+                        llvm::cl::cat(Category),
                         llvm::cl::ZeroOrMore);
 
 static llvm::cl::list<std::string>
-ImportPaths("I", llvm::cl::desc("add a directory to the import search path"));
+ImportPaths("I", llvm::cl::desc("add a directory to the import search path"),
+            llvm::cl::cat(Category));
 
 static llvm::cl::list<std::string>
-FrameworkPaths("F", llvm::cl::desc("add a directory to the framework search path"));
+FrameworkPaths("F",
+               llvm::cl::desc("add a directory to the framework search path"),
+               llvm::cl::cat(Category));
+
+static llvm::cl::list<std::string>
+SystemFrameworkPaths("iframework",
+                     llvm::cl::desc("add a directory to the system framework search path"),
+                     llvm::cl::cat(Category));
 
 static llvm::cl::opt<std::string>
 ResourceDir("resource-dir",
-            llvm::cl::desc("The directory that holds the compiler resource files"));
+            llvm::cl::desc("The directory that holds the compiler resource files"),
+            llvm::cl::cat(Category));
 
 static llvm::cl::opt<std::string>
-ImportObjCHeader("import-objc-header", llvm::cl::desc("header to implicitly import"));
+ImportObjCHeader("import-objc-header",
+                 llvm::cl::desc("header to implicitly import"),
+                 llvm::cl::cat(Category));
 
 static llvm::cl::opt<bool>
 EnableSourceImport("enable-source-import", llvm::cl::Hidden,
-                   llvm::cl::init(false));
+                   llvm::cl::cat(Category), llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 SkipDeinit("skip-deinit",
-                   llvm::cl::desc("Whether to skip printing destructors"),
-                   llvm::cl::init(true));
+           llvm::cl::desc("Whether to skip printing destructors"),
+           llvm::cl::cat(Category),
+           llvm::cl::init(true));
 
 static llvm::cl::opt<bool>
 SkipImports("skip-imports",
             llvm::cl::desc("Whether to skip printing import declarations"),
+            llvm::cl::cat(Category),
             llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 SkipOverrides("skip-overrides",
-            llvm::cl::desc("Whether to skip printing overrides/witnesses"),
-            llvm::cl::init(false));
+              llvm::cl::desc("Whether to skip printing overrides/witnesses"),
+              llvm::cl::cat(Category),
+              llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 SkipParameterNames("skip-parameter-names",
                    llvm::cl::desc("Whether to skip parameter names"),
+                   llvm::cl::cat(Category),
                    llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 AlwaysArgumentLabels("always-argument-labels",
   llvm::cl::desc("Whether to always print separate argument labels"),
+  llvm::cl::cat(Category),
   llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 DisableAccessControl("disable-access-control",
-    llvm::cl::desc("Disables access control, like a debugger"));
+    llvm::cl::desc("Disables access control, like a debugger"),
+    llvm::cl::cat(Category));
 
 static llvm::cl::opt<bool> CodeCompleteInitsInPostfixExpr(
     "code-complete-inits-in-postfix-expr",
     llvm::cl::desc(
-        "Include initializers when completing a postfix expression"));
+        "Include initializers when completing a postfix expression"),
+    llvm::cl::cat(Category));
+static llvm::cl::opt<bool> CodeCompleteCallPatternHeuristics(
+    "code-complete-call-pattern-heuristics",
+    llvm::cl::desc(
+        "Use heuristics to guess whether we want call pattern completions"),
+    llvm::cl::cat(Category));
 
 static llvm::cl::opt<bool>
 ObjCForwardDeclarations("enable-objc-forward-declarations",
     llvm::cl::desc("Import Objective-C forward declarations when possible"),
+    llvm::cl::cat(Category),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 InferImportAsMember("enable-infer-import-as-member",
-                   llvm::cl::desc("Infer when a global could be imported as a member"),
-                   llvm::cl::init(false));
+    llvm::cl::desc("Infer when a global could be imported as a member"),
+    llvm::cl::cat(Category),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool>
+EnableSwift3ObjCInference("enable-swift3-objc-inference",
+    llvm::cl::desc("Enable Swift 3's @objc inference rules"),
+    llvm::cl::cat(Category),
+    llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 DisableObjCAttrRequiresFoundationModule(
     "disable-objc-attr-requires-foundation-module",
     llvm::cl::desc("Allow @objc to be used freely"),
+    llvm::cl::cat(Category),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 PrintStats("print-stats",
            llvm::cl::desc("Print statistics"),
+           llvm::cl::cat(Category),
            llvm::cl::init(false));
 
 static llvm::cl::opt<std::string>
 DebugForbidTypecheckPrefix("debug-forbid-typecheck-prefix",
   llvm::cl::desc("Triggers llvm fatal_error if typechecker tries to typecheck "
-                 "a decl with the provided prefix name"));
+                 "a decl with the provided prefix name"),
+  llvm::cl::cat(Category));
 
 // '-code-completion' options.
 
 static llvm::cl::opt<std::string>
 CodeCompletionToken("code-completion-token",
-                    llvm::cl::desc("Code completion token name"));
+                    llvm::cl::desc("Code completion token name"),
+                    llvm::cl::cat(Category));
 
 static llvm::cl::opt<bool>
 CodeCompletionDiagnostics("code-completion-diagnostics",
                           llvm::cl::desc("Print compiler diagnostics while "
                                          "doing code completion"),
+                          llvm::cl::cat(Category),
                           llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 CodeCompletionKeywords("code-completion-keywords",
                        llvm::cl::desc("Include keywords in code completion results"),
+                       llvm::cl::cat(Category),
                        llvm::cl::init(true));
+
+static llvm::cl::opt<bool>
+CodeCompletionComments("code-completion-comments",
+                       llvm::cl::desc("Include comments in code completion results"),
+                       llvm::cl::cat(Category),
+                       llvm::cl::init(false));
 
 static llvm::cl::opt<std::string>
 DebugClientDiscriminator("debug-client-discriminator",
-  llvm::cl::desc("A discriminator to prefer in lookups"));
+  llvm::cl::desc("A discriminator to prefer in lookups"),
+  llvm::cl::cat(Category));
 
 // '-syntax-coloring' options.
 
 static llvm::cl::opt<bool>
 TerminalOutput("terminal",
-               llvm::cl::desc("Use terminal color for source annotations"));
+               llvm::cl::desc("Use terminal color for source annotations"),
+               llvm::cl::cat(Category));
 
 static llvm::cl::opt<bool>
 Typecheck("typecheck",
           llvm::cl::desc("Type check the AST"),
+          llvm::cl::cat(Category),
           llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 Playground("playground",
            llvm::cl::desc("Whether coloring in playground"),
+           llvm::cl::cat(Category),
            llvm::cl::init(false));
 
 // AST printing options.
@@ -359,76 +431,90 @@ Playground("playground",
 static llvm::cl::opt<bool>
 FunctionDefinitions("function-definitions",
                     llvm::cl::desc("Print function bodies"),
+                    llvm::cl::cat(Category),
                     llvm::cl::init(true));
 
 static llvm::cl::opt<bool>
 AbstractAccessors("abstract-accessors",
                   llvm::cl::desc("Hide the concrete accessors used to "
                                  "implement a property or subscript"),
+                  llvm::cl::cat(Category),
                   llvm::cl::init(true));
 
 static llvm::cl::opt<bool>
 PreferTypeRepr("prefer-type-repr",
                llvm::cl::desc("When printing types, prefer printing TypeReprs"),
+               llvm::cl::cat(Category),
                llvm::cl::init(true));
 
 static llvm::cl::opt<bool>
 FullyQualifiedTypes("fully-qualified-types",
                     llvm::cl::desc("Print fully qualified types"),
+                    llvm::cl::cat(Category),
                     llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 ExplodePatternBindingDecls(
     "explode-pattern-binding-decls",
     llvm::cl::desc("Separate pattern binding decls into individual var decls"),
+    llvm::cl::cat(Category),
     llvm::cl::init(false));
 
 static llvm::cl::opt<std::string>
 MangledNameToFind("find-mangled",
-    llvm::cl::desc("Print the entity with the given mangled name"));
+    llvm::cl::desc("Print the entity with the given mangled name"),
+    llvm::cl::cat(Category));
 
 // Module printing options.
 
 static llvm::cl::list<std::string>
 ModuleToPrint("module-to-print",
-              llvm::cl::desc("Name of the module to print"));
+              llvm::cl::desc("Name of the module to print"),
+              llvm::cl::cat(Category));
 
 static llvm::cl::list<std::string>
 ModuleGroupToPrint("module-group",
-                   llvm::cl::desc("Name of the module group to print"));
+                   llvm::cl::desc("Name of the module group to print"),
+                   llvm::cl::cat(Category));
 
 static llvm::cl::opt<bool>
 ModulePrintSubmodules("module-print-submodules",
                       llvm::cl::desc("Recursively print submodules"),
+                      llvm::cl::cat(Category),
                       llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 ModulePrintHidden("module-print-hidden",
                   llvm::cl::desc("Print non-exported imported or submodules"),
+                  llvm::cl::cat(Category),
                   llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 ModulePrintSkipOverlay("module-print-skip-overlay",
-                  llvm::cl::desc("Skip Swift overlay modules"),
-                  llvm::cl::init(false));
+                       llvm::cl::desc("Skip Swift overlay modules"),
+                       llvm::cl::cat(Category),
+                       llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 FullyQualifiedTypesIfAmbiguous(
     "fully-qualified-types-if-ambiguous",
     llvm::cl::desc("Print types fully-qualified if they would be ambiguous "
                    "otherwise"),
+    llvm::cl::cat(Category),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 SynthesizeSugarOnTypes(
     "synthesize-sugar-on-types",
     llvm::cl::desc("Always print Array and Optional with sugar"),
+    llvm::cl::cat(Category),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 AnnotatePrint("annotate-print",
-               llvm::cl::desc("Annotate AST printing"),
-               llvm::cl::init(false));
+              llvm::cl::desc("Annotate AST printing"),
+              llvm::cl::cat(Category),
+              llvm::cl::init(false));
 
 // AST and module printing options.
 
@@ -436,104 +522,141 @@ static llvm::cl::opt<bool>
 PrintInterface("print-interface",
                llvm::cl::desc("Print with options set for interface printing, "
                               "overrides any other printing option"),
+               llvm::cl::cat(Category),
                llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 PrintInterfaceForDoc("print-interface-doc",
-               llvm::cl::desc("Print with options set for interface printing, "
-                        "for doc support; overrides any other printing option"),
-               llvm::cl::init(false));
+    llvm::cl::desc("Print with options set for interface printing, "
+                   "for doc support; overrides any other printing option"),
+    llvm::cl::cat(Category),
+    llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 PrintImplicitAttrs("print-implicit-attrs",
                    llvm::cl::desc("Print implicit attributes"),
+                   llvm::cl::cat(Category),
                    llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
-PrintAccessibility("print-accessibility",
-                   llvm::cl::desc("Print accessibility for all values"),
-                   llvm::cl::init(false));
+PrintAccess("print-access",
+            llvm::cl::desc("Print access keywords for all values"),
+            llvm::cl::cat(Category),
+            llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 SkipUnavailable("skip-unavailable",
                 llvm::cl::desc("Don't print unavailable declarations"),
+                llvm::cl::cat(Category),
                 llvm::cl::init(false));
 
-static llvm::cl::opt<Accessibility>
-AccessibilityFilter(
-    llvm::cl::desc("Accessibility filter:"),
-    llvm::cl::init(Accessibility::Private),
+static llvm::cl::opt<AccessLevel>
+AccessFilter(
+    llvm::cl::desc("Access filter:"),
+    llvm::cl::cat(Category),
+    llvm::cl::init(AccessLevel::Private),
     llvm::cl::values(
-        clEnumValN(Accessibility::Private, "accessibility-filter-private",
+        clEnumValN(AccessLevel::Private, "access-filter-private",
             "Print all declarations"),
-        clEnumValN(Accessibility::Internal, "accessibility-filter-internal",
+        clEnumValN(AccessLevel::Internal, "access-filter-internal",
             "Print internal and public declarations"),
-        clEnumValN(Accessibility::Public, "accessibility-filter-public",
-            "Print public declarations"),
-        clEnumValEnd));
+        clEnumValN(AccessLevel::Public, "access-filter-public",
+            "Print public declarations")));
 
 static llvm::cl::opt<bool>
 SynthesizeExtension("synthesize-extension",
                     llvm::cl::desc("Print synthesized extensions from conforming protocols."),
+                    llvm::cl::cat(Category),
                     llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 SkipPrivateStdlibDecls("skip-private-stdlib-decls",
-                llvm::cl::desc("Don't print declarations that start with '_'"),
-                llvm::cl::init(false));
+    llvm::cl::desc("Don't print declarations that start with '_'"),
+    llvm::cl::cat(Category),
+    llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 SkipUnderscoredStdlibProtocols("skip-underscored-stdlib-protocols",
-                llvm::cl::desc("Don't print protocols that start with '_'"),
-                llvm::cl::init(false));
+    llvm::cl::desc("Don't print protocols that start with '_'"),
+    llvm::cl::cat(Category),
+    llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 SkipDocumentationComments("skip-print-doc-comments",
-             llvm::cl::desc("Don't print documentation comments from clang module headers"),
-             llvm::cl::init(false));
+    llvm::cl::desc("Don't print documentation comments from clang module headers"),
+    llvm::cl::cat(Category),
+    llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 PrintRegularComments("print-regular-comments",
-             llvm::cl::desc("Print regular comments from clang module headers"),
-             llvm::cl::init(false));
+    llvm::cl::desc("Print regular comments from clang module headers"),
+    llvm::cl::cat(Category),
+    llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
 PrintOriginalSourceText("print-original-source",
-             llvm::cl::desc("print the original source text for applicable declarations"),
-             llvm::cl::init(false));
+    llvm::cl::desc("print the original source text for applicable declarations"),
+    llvm::cl::cat(Category),
+    llvm::cl::init(false));
 
 static llvm::cl::opt<std::string>
 CommentsXMLSchema("comments-xml-schema",
-                  llvm::cl::desc("Filename of the RelaxNG schema for documentation comments"));
+                  llvm::cl::desc("Filename of the RelaxNG schema for documentation comments"),
+                  llvm::cl::cat(Category));
 
 static llvm::cl::list<std::string>
-ClangXCC("Xcc", llvm::cl::desc("option to pass to clang"));
+ClangXCC("Xcc", llvm::cl::desc("option to pass to clang"),
+         llvm::cl::cat(Category));
 
 static llvm::cl::list<std::string>
 HeaderToPrint("header-to-print",
-              llvm::cl::desc("Header filename to print swift interface for"));
+              llvm::cl::desc("Header filename to print swift interface for"),
+              llvm::cl::cat(Category));
 
 static llvm::cl::list<std::string>
 DeclToPrint("decl-to-print",
-            llvm::cl::desc("Decl name to print swift interface for"));
+            llvm::cl::desc("Decl name to print swift interface for"),
+            llvm::cl::cat(Category));
 
 static llvm::cl::opt<std::string>
-LineColumnPair("pos", llvm::cl::desc("Line:Column pair"));
+LineColumnPair("pos", llvm::cl::desc("Line:Column pair"),
+               llvm::cl::cat(Category));
 
 static llvm::cl::opt<std::string>
-USR("usr", llvm::cl::desc("USR"));
+EndLineColumnPair("end-pos", llvm::cl::desc("Line:Column pair"),
+                  llvm::cl::cat(Category));
+
+static llvm::cl::opt<std::string>
+USR("usr", llvm::cl::desc("USR"),
+    llvm::cl::cat(Category));
 
 static llvm::cl::opt<std::string>
 ModuleName("module-name", llvm::cl::desc("The module name of the given test."),
-           llvm::cl::init("swift_ide_test"));
+           llvm::cl::cat(Category), llvm::cl::init("swift_ide_test"));
 
 static llvm::cl::opt<bool>
 NoEmptyLineBetweenMembers("no-empty-line-between-members",
                           llvm::cl::desc("Print no empty line between members."),
+                          llvm::cl::cat(Category),
                           llvm::cl::init(false));
 
 static llvm::cl::opt<bool> DebugConstraintSolver("debug-constraints",
-    llvm::cl::desc("Enable verbose debugging from the constraint solver."));
+    llvm::cl::desc("Enable verbose debugging from the constraint solver."),
+    llvm::cl::cat(Category));
+
+static llvm::cl::opt<bool>
+IncludeLocals("include-locals", llvm::cl::desc("Index local symbols too."),
+              llvm::cl::cat(Category), llvm::cl::init(false));
+
+static llvm::cl::opt<bool>
+    EnableObjCInterop("enable-objc-interop",
+                      llvm::cl::desc("Enable ObjC interop."),
+                      llvm::cl::cat(Category), llvm::cl::init(false));
+
+static llvm::cl::opt<bool>
+    DisableObjCInterop("disable-objc-interop",
+                       llvm::cl::desc("Disable ObjC interop."),
+                       llvm::cl::cat(Category), llvm::cl::init(false));
 } // namespace options
 
 static std::unique_ptr<llvm::MemoryBuffer>
@@ -554,7 +677,8 @@ static int doCodeCompletion(const CompilerInvocation &InitInvok,
                             StringRef SecondSourceFileName,
                             StringRef CodeCompletionToken,
                             bool CodeCompletionDiagnostics,
-                            bool CodeCompletionKeywords) {
+                            bool CodeCompletionKeywords,
+                            bool CodeCompletionComments) {
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> FileBufOrErr =
     llvm::MemoryBuffer::getFile(SourceFilename);
   if (!FileBufOrErr) {
@@ -580,6 +704,7 @@ static int doCodeCompletion(const CompilerInvocation &InitInvok,
                << " at offset " << CodeCompletionOffset << "\n";
 
   CompilerInvocation Invocation(InitInvok);
+
   Invocation.setCodeCompletionPoint(CleanFile.get(), CodeCompletionOffset);
 
 
@@ -594,17 +719,18 @@ static int doCodeCompletion(const CompilerInvocation &InitInvok,
   // Create a CodeCompletionConsumer.
   std::unique_ptr<ide::CodeCompletionConsumer> Consumer(
       new ide::PrintingCodeCompletionConsumer(
-          llvm::outs(), CodeCompletionKeywords));
+          llvm::outs(), CodeCompletionKeywords, CodeCompletionComments));
 
   // Create a factory for code completion callbacks that will feed the
   // Consumer.
   std::unique_ptr<CodeCompletionCallbacksFactory> CompletionCallbacksFactory(
       ide::makeCodeCompletionCallbacksFactory(CompletionContext,
-                                              *Consumer.get()));
+                                              *Consumer));
 
   Invocation.setCodeCompletionFactory(CompletionCallbacksFactory.get());
   if (!SecondSourceFileName.empty()) {
-    Invocation.addInputFilename(SecondSourceFileName);
+    Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(
+        SecondSourceFileName);
   }
   CompilerInstance CI;
 
@@ -771,6 +897,7 @@ public:
     case SyntaxNodeKind::TypeId: Id = "type"; break;
     case SyntaxNodeKind::BuildConfigKeyword: Id = "#kw"; break;
     case SyntaxNodeKind::BuildConfigId: Id = "#id"; break;
+    case SyntaxNodeKind::PoundDirectiveKeyword: Id = "#kw"; break;
     case SyntaxNodeKind::AttributeId: Id = "attr-id"; break;
     case SyntaxNodeKind::AttributeBuiltin: Id = "attr-builtin"; break;
     case SyntaxNodeKind::EditorPlaceholder: Id = "placeholder"; break;
@@ -801,6 +928,7 @@ public:
     case SyntaxNodeKind::TypeId: Col = llvm::raw_ostream::CYAN; break;
     case SyntaxNodeKind::BuildConfigKeyword: Col = llvm::raw_ostream::YELLOW; break;
     case SyntaxNodeKind::BuildConfigId: Col = llvm::raw_ostream::YELLOW; break;
+    case SyntaxNodeKind::PoundDirectiveKeyword: Col = llvm::raw_ostream::YELLOW; break;
     case SyntaxNodeKind::AttributeId: Col = llvm::raw_ostream::CYAN; break;
     case SyntaxNodeKind::AttributeBuiltin: Col = llvm::raw_ostream::MAGENTA; break;
     case SyntaxNodeKind::EditorPlaceholder: Col = llvm::raw_ostream::YELLOW; break;
@@ -822,7 +950,7 @@ public:
   }
 };
 
-}
+} // end anonymous namespace
 
 static int doSyntaxColoring(const CompilerInvocation &InitInvok,
                             StringRef SourceFilename,
@@ -830,7 +958,7 @@ static int doSyntaxColoring(const CompilerInvocation &InitInvok,
                             bool RunTypeChecker,
                             bool Playground) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFilename);
   Invocation.getLangOptions().DisableAvailabilityChecking = false;
 
   CompilerInstance CI;
@@ -839,6 +967,8 @@ static int doSyntaxColoring(const CompilerInvocation &InitInvok,
   PrintingDiagnosticConsumer PrintDiags;
   CI.addDiagnosticConsumer(&PrintDiags);
   Invocation.getLangOptions().Playground = Playground;
+  Invocation.getLangOptions().CollectParsedToken = true;
+  Invocation.getLangOptions().BuildSyntaxTree = true;
   if (CI.setup(Invocation))
     return 1;
   if (!RunTypeChecker)
@@ -872,7 +1002,7 @@ static int doDumpImporterLookupTables(const CompilerInvocation &InitInvok,
   }
 
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFilename);
 
   CompilerInstance CI;
 
@@ -931,6 +1061,8 @@ private:
     for (auto &Elem : Node.Elements) {
       tagRange(Elem.Range, getTagName(Elem.Kind), Node);
     }
+    if (Node.TypeRange.isValid() && Node.Range.contains(Node.TypeRange))
+      tagRange(Node.TypeRange, "type", Node);
 
     return true;
   }
@@ -964,11 +1096,15 @@ private:
       case SyntaxStructureKind::InstanceVariable: return "property";
       case SyntaxStructureKind::StaticVariable: return "svar";
       case SyntaxStructureKind::ClassVariable: return "cvar";
+      case SyntaxStructureKind::LocalVariable: return "lvar";
       case SyntaxStructureKind::EnumCase: return "enum-case";
       case SyntaxStructureKind::EnumElement: return "enum-elem";
+      case SyntaxStructureKind::TypeAlias: return "typealias";
+      case SyntaxStructureKind::Subscript: return "subscript";
+      case SyntaxStructureKind::AssociatedType: return "associatedtype";
+      case SyntaxStructureKind::GenericTypeParam: return "generic-param";
       case SyntaxStructureKind::Parameter: return "param";
       case SyntaxStructureKind::ForEachStatement: return "foreach";
-      case SyntaxStructureKind::ForStatement: return "for";
       case SyntaxStructureKind::WhileStatement: return "while";
       case SyntaxStructureKind::RepeatWhileStatement: return "repeat-while";
       case SyntaxStructureKind::IfStatement: return "if";
@@ -981,6 +1117,8 @@ private:
       case SyntaxStructureKind::DictionaryExpression: return "dictionary";
       case SyntaxStructureKind::ObjectLiteralExpression:
         return "object-literal-expression";
+      case SyntaxStructureKind::TupleExpression: return "tuple";
+      case SyntaxStructureKind::ClosureExpression: return "closure";
     }
     llvm_unreachable("unhandled tag?");
   }
@@ -1043,7 +1181,9 @@ private:
 static int doStructureAnnotation(const CompilerInvocation &InitInvok,
                                  StringRef SourceFilename) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
+  Invocation.getLangOptions().BuildSyntaxTree = true;
+  Invocation.getLangOptions().CollectParsedToken = true;
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFilename);
 
   CompilerInstance CI;
 
@@ -1130,20 +1270,23 @@ private:
   bool walkToDeclPre(Decl *D, CharSourceRange Range) override {
     if (Range.getByteLength() == 0)
       return true;
-    if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
+    if (auto *VD = dyn_cast<ValueDecl>(D))
       annotateSourceEntity({ Range, VD, nullptr, /*IsRef=*/false});
     return true;
   }
 
   bool visitDeclReference(ValueDecl *D, CharSourceRange Range,
-                          TypeDecl *CtorTyRef, Type Ty) override {
+                          TypeDecl *CtorTyRef, ExtensionDecl *ExtTyRef, Type Ty,
+                          ReferenceMetaData Data) override {
     annotateSourceEntity({ Range, D, CtorTyRef, /*IsRef=*/true });
     return true;
   }
 
   bool visitSubscriptReference(ValueDecl *D, CharSourceRange Range,
+                               Optional<AccessKind> AccKind,
                                bool IsOpenBracket) override {
-    return visitDeclReference(D, Range, nullptr, Type());
+    return visitDeclReference(D, Range, nullptr, nullptr, Type(),
+                      ReferenceMetaData(SemaReferenceKind::SubscriptRef, AccKind));
   }
 
   bool visitCallArgName(Identifier Name, CharSourceRange Range,
@@ -1296,7 +1439,7 @@ static int doSemanticAnnotation(const CompilerInvocation &InitInvok,
                                 StringRef SourceFilename,
                                 bool TerminalOutput) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFilename);
 
   CompilerInstance CI;
 
@@ -1338,7 +1481,7 @@ static int doInputCompletenessTest(StringRef SourceFilename) {
 // AST printing
 //===----------------------------------------------------------------------===//
 
-static Module *getModuleByFullName(ASTContext &Context, StringRef ModuleName) {
+static ModuleDecl *getModuleByFullName(ASTContext &Context, StringRef ModuleName) {
   SmallVector<std::pair<Identifier, SourceLoc>, 4>
       AccessPath;
   while (!ModuleName.empty()) {
@@ -1350,7 +1493,7 @@ static Module *getModuleByFullName(ASTContext &Context, StringRef ModuleName) {
   return Context.getModule(AccessPath);
 }
 
-static Module *getModuleByFullName(ASTContext &Context, Identifier ModuleName) {
+static ModuleDecl *getModuleByFullName(ASTContext &Context, Identifier ModuleName) {
   return Context.getModule(std::make_pair(ModuleName, SourceLoc()));
 }
 
@@ -1361,7 +1504,7 @@ static int doPrintAST(const CompilerInvocation &InitInvok,
                       StringRef MangledNameToFind,
                       StringRef DebugClientDiscriminator) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFilename);
 
   CompilerInstance CI;
 
@@ -1386,114 +1529,22 @@ static int doPrintAST(const CompilerInvocation &InitInvok,
     CI.performSema();
 
   if (MangledNameToFind.empty()) {
-    Module *M = CI.getMainModule();
+    ModuleDecl *M = CI.getMainModule();
     M->getMainSourceFile(Invocation.getSourceFileKind()).print(llvm::outs(),
                                                                Options);
     return EXIT_SUCCESS;
   }
 
-  // If we were given a mangled name, do a very simple form of LLDB's logic to
-  // look up a type based on that name.
-  Demangle::NodePointer node =
-    demangle_wrappers::demangleSymbolAsNode(MangledNameToFind);
-  using NodeKind = Demangle::Node::Kind;
-
-  if (!node) {
-    llvm::errs() << "Unable to demangle name.\n";
-    return EXIT_FAILURE;
-  }
-  node = node->getFirstChild();
-
-  // FIXME: Look up things other than types.
-  if (node->getKind() != NodeKind::TypeMangling) {
-    llvm::errs() << "Name does not refer to a type.\n";
-    return EXIT_FAILURE;
-  }
-  node = node->getFirstChild();
-  assert(node->getKind() == NodeKind::Type);
-  node = node->getFirstChild();
-
-  switch (node->getKind()) {
-  case NodeKind::Class:
-  case NodeKind::Enum:
-  case NodeKind::Protocol:
-  case NodeKind::Structure:
-  case NodeKind::TypeAlias:
-    break;
-  default:
-    llvm::errs() << "Name does not refer to a nominal type or typealias.\n";
+  // If we were given a mangled name, only print that declaration.
+  std::string error;
+  const Decl *D = ide::getDeclFromMangledSymbolName(CI.getASTContext(),
+                                                    MangledNameToFind, error);
+  if (!D) {
+    llvm::errs() << "Unable to find decl for symbol: " << error << "\n";
     return EXIT_FAILURE;
   }
 
-  ASTContext &ctx = CI.getASTContext();
-
-  SmallVector<std::pair<DeclName, Identifier>, 4> identifiers;
-  do {
-    auto nameNode = node->getChild(1);
-    switch (nameNode->getKind()) {
-    case NodeKind::Identifier:
-      identifiers.push_back({ ctx.getIdentifier(nameNode->getText()),
-                              Identifier() });
-      break;
-    case NodeKind::PrivateDeclName:
-      identifiers.push_back({
-        ctx.getIdentifier(nameNode->getChild(1)->getText()),
-        ctx.getIdentifier(nameNode->getChild(0)->getText())
-      });
-      break;
-    default:
-      llvm::errs() << "Unsupported name kind.\n";
-      return EXIT_FAILURE;
-    }
-
-    node = node->getChild(0);
-
-    switch (node->getKind()) {
-    case NodeKind::Module:
-      // Will break out of loop below.
-      break;
-    case NodeKind::Class:
-    case NodeKind::Enum:
-    case NodeKind::Protocol:
-    case NodeKind::Structure:
-      break;
-    default:
-      llvm::errs() << "Name does not refer to a nominal type.\n";
-      return EXIT_FAILURE;
-    }
-  } while (node->getKind() != NodeKind::Module);
-
-  Module *M = getModuleByFullName(ctx, node->getText());
-  SmallVector<ValueDecl *, 4> results;
-  M->lookupMember(results, M, identifiers.back().first,
-                  identifiers.back().second);
-
-  if (results.empty()) {
-    llvm::errs() << "No matching declarations found for "
-      << MangledNameToFind << ".\n";
-    return EXIT_FAILURE;
-  }
-
-  // Progressively perform lookup into matching containers.
-  for (auto member : reversed(llvm::makeArrayRef(identifiers).drop_back())) {
-    decltype(results) prevResults;
-    std::swap(results, prevResults);
-
-    for (auto container : prevResults) {
-      M->lookupMember(results, cast<NominalTypeDecl>(container),
-                      member.first, member.second);
-    }
-
-    if (results.empty()) {
-      llvm::errs() << "No matching declarations found for "
-        << MangledNameToFind << ".\n";
-      return EXIT_FAILURE;
-    }
-  }
-
-  for (auto *VD : results)
-    VD->print(llvm::outs(), Options);
-
+  D->print(llvm::outs(), Options);
   return EXIT_SUCCESS;
 }
 
@@ -1534,13 +1585,10 @@ static int doPrintLocalTypes(const CompilerInvocation &InitInvok,
 
     // Simulate already having mangled names
     for (auto LTD : LocalTypeDecls) {
-      std::string MangledName;
-      {
-        Mangle::Mangler Mangler(/*DWARFMangling*/ true);
-        Mangler.mangleTypeForDebugger(LTD->getDeclaredType(),
-                                      LTD->getDeclContext());
-        MangledName = Mangler.finalize();
-      }
+      Mangle::ASTMangler Mangler;
+      std::string MangledName = Mangler.mangleTypeForDebugger(
+          LTD->getDeclaredInterfaceType(), LTD->getDeclContext(),
+          LTD->getDeclContext()->getGenericEnvironmentOfContext());
       MangledNames.push_back(MangledName);
     }
 
@@ -1548,7 +1596,8 @@ static int doPrintLocalTypes(const CompilerInvocation &InitInvok,
     for (auto MangledName : MangledNames) {
 
       // Global
-      auto node = demangle_wrappers::demangleSymbolAsNode(MangledName);
+      Demangle::Context DCtx;
+      auto node = DCtx.demangleSymbolAsNode(MangledName);
 
       // TypeMangling
       node = node->getFirstChild();
@@ -1561,15 +1610,30 @@ static int doPrintLocalTypes(const CompilerInvocation &InitInvok,
       node = node->getFirstChild();
 
       switch (node->getKind()) {
-        case NodeKind::Structure:
-        case NodeKind::Class:
-        case NodeKind::Enum:
-          break;
+      case NodeKind::Structure:
+      case NodeKind::Class:
+      case NodeKind::Enum:
+      case NodeKind::OtherNominalType:
+        break;
 
-        default:
-          llvm::errs() << "Expected a nominal type node in " <<
-            MangledName << "\n";
-          return EXIT_FAILURE;
+      case NodeKind::BoundGenericStructure:
+      case NodeKind::BoundGenericClass:
+      case NodeKind::BoundGenericEnum:
+      case NodeKind::BoundGenericOtherNominalType:
+        // Base type
+        typeNode = node->getFirstChild();
+        // Nominal type
+        node = typeNode->getFirstChild();
+        assert(node->getKind() == NodeKind::Structure ||
+               node->getKind() == NodeKind::Class ||
+               node->getKind() == NodeKind::Enum ||
+               node->getKind() == NodeKind::OtherNominalType);
+        break;
+
+      default:
+        llvm::errs() << "Expected a nominal type node in " <<
+          MangledName << "\n";
+        return EXIT_FAILURE;
       }
 
       while (node->getKind() != NodeKind::LocalDeclName)
@@ -1587,7 +1651,7 @@ static int doPrintLocalTypes(const CompilerInvocation &InitInvok,
       llvm::outs() << remangled << "\n";
 
       auto Options = PrintOptions::printEverything();
-      Options.PrintAccessibility = false;
+      Options.PrintAccess = false;
       LTD->print(llvm::outs(), Options);
       llvm::outs() << "\n";
     }
@@ -1605,10 +1669,10 @@ public:
 
   void printDeclPre(const Decl *D, Optional<BracketOptions> Bracket) override {
     StringRef HasDefault = "";
-    if (D->getKind() == DeclKind::Protocol) {
+    if (isa<ProtocolDecl>(D)) {
       InProtocol = true;
       DefaultImplementationMap.clear();
-      ProtocolDecl *PD = const_cast<ProtocolDecl*>(dyn_cast<ProtocolDecl>(D));
+      auto *PD = const_cast<ProtocolDecl*>(dyn_cast<ProtocolDecl>(D));
       collectDefaultImplementationForProtocolMembers(PD,
                                                      DefaultImplementationMap);
     }
@@ -1629,7 +1693,7 @@ public:
     OS << "</loc>";
   }
   void printDeclPost(const Decl *D, Optional<BracketOptions> Bracket) override {
-    if (D->getKind() == DeclKind::Protocol) {
+    if (isa<ProtocolDecl>(D)) {
       InProtocol = false;
     }
     OS << "</decl>";
@@ -1643,18 +1707,18 @@ public:
       printDeclPost(D, None);
   }
 
-
   void printSynthesizedExtensionPre(const ExtensionDecl *ED,
-                                    const NominalTypeDecl *NTD,
+                                    TypeOrExtensionDecl Target,
                                     Optional<BracketOptions> Bracket) override {
     if (Bracket.hasValue() && !Bracket.getValue().shouldOpenExtension(ED))
       return;
     OS << "<synthesized>";
   }
 
-  void printSynthesizedExtensionPost(const ExtensionDecl *ED,
-                                     const NominalTypeDecl *NTD,
-                                     Optional<BracketOptions> Bracket) override {
+  void
+  printSynthesizedExtensionPost(const ExtensionDecl *ED,
+                                TypeOrExtensionDecl Target,
+                                Optional<BracketOptions> Bracket) override {
     if (Bracket.hasValue() && !Bracket.getValue().shouldCloseExtension(ED))
       return;
     OS << "</synthesized>";
@@ -1671,7 +1735,7 @@ public:
     OS << "</ref>";
   }
 };
-}
+} // end anonymous namespace
 
 struct GroupNamesPrinter {
   llvm::StringSet<> Groups;
@@ -1874,8 +1938,8 @@ static int doPrintSwiftFileInterface(const CompilerInvocation &InitInvok,
                                      StringRef SourceFilename,
                                      bool AnnotatePrint) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
-  Invocation.getFrontendOptions().PrimaryInput = 0;
+  Invocation.getFrontendOptions().InputsAndOutputs.addPrimaryInputFile(
+      SourceFilename);
   Invocation.getLangOptions().AttachCommentsToDecls = true;
   CompilerInstance CI;
   // Display diagnostics to stderr.
@@ -1905,8 +1969,8 @@ static int doPrintDecls(const CompilerInvocation &InitInvok,
                         const PrintOptions &Options,
                         bool AnnotatePrint) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
-  Invocation.getFrontendOptions().PrimaryInput = 0;
+  Invocation.getFrontendOptions().InputsAndOutputs.addPrimaryInputFile(
+      SourceFilename);
   Invocation.getLangOptions().AttachCommentsToDecls = true;
   CompilerInstance CI;
   // Display diagnostics to stderr.
@@ -1931,8 +1995,8 @@ static int doPrintDecls(const CompilerInvocation &InitInvok,
 
       if (auto typeDecl = dyn_cast<TypeDecl>(result.getValueDecl())) {
         if (auto typeAliasDecl = dyn_cast<TypeAliasDecl>(typeDecl)) {
-          TypeDecl *origTypeDecl = typeAliasDecl->getUnderlyingType()
-            ->getNominalOrBoundGenericNominal();
+          TypeDecl *origTypeDecl = typeAliasDecl->getDeclaredInterfaceType()
+            ->getAnyNominal();
           if (origTypeDecl) {
             origTypeDecl->print(*Printer, Options);
             typeDecl = origTypeDecl;
@@ -1968,7 +2032,7 @@ public:
     if (auto *VD = dyn_cast<ValueDecl>(D)) {
       OS.indent(IndentLevel * 2);
       OS << Decl::getKindName(VD->getKind()) << "Decl '''"
-         << VD->getName().str() << "''' ";
+         << VD->getBaseName() << "''' ";
       VD->getInterfaceType().print(OS, Options);
       OS << "\n";
     }
@@ -2017,7 +2081,7 @@ static int doPrintTypes(const CompilerInvocation &InitInvok,
                         StringRef SourceFilename,
                         bool FullyQualifiedTypes) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFilename);
 
   CompilerInstance CI;
   // Display diagnostics to stderr.
@@ -2054,7 +2118,7 @@ public:
     return true;
   }
 };
-} // end namespace
+} // end anonymous namespace
 
 namespace {
 class ASTCommentPrinter : public ASTWalker {
@@ -2090,42 +2154,39 @@ public:
       if (!Id.empty())
         OS << Id.str() << ".";
     }
-    Identifier Id = VD->getName();
-    if (!Id.empty()) {
-      OS << Id.str();
+    DeclBaseName Name = VD->getBaseName();
+    if (!Name.empty()) {
+      OS << Name;
       return;
     }
-    if (auto FD = dyn_cast<FuncDecl>(VD)) {
-      if (auto *ASD = FD->getAccessorStorageDecl()) {
-        switch (FD->getAccessorKind()) {
-        case AccessorKind::NotAccessor:
-          llvm_unreachable("is not an accessor?");
-        case AccessorKind::IsGetter:
-          OS << "<getter for ";
-          break;
-        case AccessorKind::IsSetter:
-          OS << "<setter for ";
-          break;
-        case AccessorKind::IsWillSet:
-          OS << "<willSet for ";
-          break;
-        case AccessorKind::IsDidSet:
-          OS << "<didSet for ";
-          break;
-        case AccessorKind::IsAddressor:
-          OS << "<addressor for ";
-          break;
-        case AccessorKind::IsMutableAddressor:
-          OS << "<mutableAddressor for ";
-          break;
-        case AccessorKind::IsMaterializeForSet:
-          OS << "<materializeForSet for ";
-          break;
-        }
-        printDeclName(ASD);
-        OS << ">";
-        return;
+    if (auto accessor = dyn_cast<AccessorDecl>(VD)) {
+      auto *storage = accessor->getStorage();
+      switch (accessor->getAccessorKind()) {
+      case AccessorKind::IsGetter:
+        OS << "<getter for ";
+        break;
+      case AccessorKind::IsSetter:
+        OS << "<setter for ";
+        break;
+      case AccessorKind::IsWillSet:
+        OS << "<willSet for ";
+        break;
+      case AccessorKind::IsDidSet:
+        OS << "<didSet for ";
+        break;
+      case AccessorKind::IsAddressor:
+        OS << "<addressor for ";
+        break;
+      case AccessorKind::IsMutableAddressor:
+        OS << "<mutableAddressor for ";
+        break;
+      case AccessorKind::IsMaterializeForSet:
+        OS << "<materializeForSet for ";
+        break;
       }
+      printDeclName(storage);
+      OS << ">";
+      return;
     }
     OS << "<anonymous>";
   }
@@ -2222,7 +2283,7 @@ public:
       OS << " ";
       printDocComment(D);
       OS << "\n";
-    } else if (D->getKind() == DeclKind::Extension) {
+    } else if (isa<ExtensionDecl>(D)) {
       SourceLoc Loc = D->getLoc();
       if (Loc.isValid()) {
         auto LineAndColumn = SM.getLineAndColumn(Loc);
@@ -2246,7 +2307,7 @@ public:
 static int doDumpComments(const CompilerInvocation &InitInvok,
                           StringRef SourceFilename) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFilename);
   Invocation.getLangOptions().AttachCommentsToDecls = true;
   CompilerInstance CI;
   // Display diagnostics to stderr.
@@ -2268,7 +2329,7 @@ static int doPrintComments(const CompilerInvocation &InitInvok,
                            StringRef SourceFilename,
                            StringRef CommentsXMLSchema) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFilename);
   Invocation.getLangOptions().AttachCommentsToDecls = true;
   Invocation.getLangOptions().EnableObjCAttrRequiresFoundation = false;
 
@@ -2355,22 +2416,22 @@ static int doPrintModuleImports(const CompilerInvocation &InitInvok,
       continue;
     }
 
-    auto isClangModule = [](const Module *M) -> bool {
+    auto isClangModule = [](const ModuleDecl *M) -> bool {
       if (!M->getFiles().empty())
         if (M->getFiles().front()->getKind() == FileUnitKind::ClangModule)
           return true;
       return false;
     };
 
-    SmallVector<Module::ImportedModule, 16> scratch;
-    M->forAllVisibleModules({}, [&](const Module::ImportedModule &next) {
+    SmallVector<ModuleDecl::ImportedModule, 16> scratch;
+    M->forAllVisibleModules({}, [&](const ModuleDecl::ImportedModule &next) {
       llvm::outs() << next.second->getName();
       if (isClangModule(next.second))
         llvm::outs() << " (Clang)";
       llvm::outs() << ":\n";
 
       scratch.clear();
-      next.second->getImportedModules(scratch, Module::ImportFilter::Public);
+      next.second->getImportedModules(scratch, ModuleDecl::ImportFilter::Public);
       for (auto &import : scratch) {
         llvm::outs() << "\t" << import.second->getName();
         for (auto accessPathPiece : import.first) {
@@ -2398,7 +2459,7 @@ static int doPrintTypeInterface(const CompilerInvocation &InitInvok,
   if (!Pair.hasValue())
     return 1;
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(FileName);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(FileName);
   CompilerInstance CI;
   if (CI.setup(Invocation))
     return 1;
@@ -2411,7 +2472,7 @@ static int doPrintTypeInterface(const CompilerInvocation &InitInvok,
       break;
   }
   assert(SF && "no source file?");
-  SemaLocResolver Resolver(*SF);
+  CursorInfoResolver Resolver(*SF);
   SourceManager &SM = SF->getASTContext().SourceMgr;
   auto Offset = SM.resolveFromLineCol(BufID, Pair.getValue().first,
                                       Pair.getValue().second);
@@ -2444,7 +2505,7 @@ static int doPrintTypeInterfaceForTypeUsr(const CompilerInvocation &InitInvok,
                                           const StringRef FileName,
                                           const StringRef Usr) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(FileName);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(FileName);
   CompilerInstance CI;
   if (CI.setup(Invocation))
     return 1;
@@ -2479,7 +2540,7 @@ public:
 
 private:
   bool walkToDeclPre(Decl *D, CharSourceRange Range) override {
-    if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
+    if (auto *VD = dyn_cast<ValueDecl>(D))
       printUSR(VD, Range.getStart());
     return true;
   }
@@ -2505,7 +2566,7 @@ private:
     }
   }
 
-  bool shouldWalkIntoFunctionGenericParams() override {
+  bool shouldWalkIntoGenericParams() override {
     return false;
   }
 };
@@ -2519,6 +2580,7 @@ class TypeReconstructWalker : public SourceEntityWalker {
   ASTContext &Ctx;
   llvm::raw_ostream &Stream;
   llvm::DenseSet<ValueDecl *> SeenDecls;
+  llvm::SmallVector<DeclContext *, 2> NestedDCs;
 
 public:
   TypeReconstructWalker(ASTContext &Ctx, llvm::raw_ostream &Stream)
@@ -2528,27 +2590,39 @@ public:
     if (auto *VD = dyn_cast<ValueDecl>(D)) {
       if (SeenDecls.insert(VD).second)
         tryDemangleDecl(VD, range, /*isRef=*/false);
+      NestedDCs.push_back(VD->getInnermostDeclContext());
     }
     return true;
   }
 
+  bool walkToDeclPost(Decl *D) override {
+    if (isa<ValueDecl>(D))
+      NestedDCs.pop_back();
+    return true;
+  }
+
   bool visitDeclReference(ValueDecl *D, CharSourceRange Range,
-                          TypeDecl *CtorTyRef, Type T) override {
+                          TypeDecl *CtorTyRef, ExtensionDecl *ExtTyRef, Type T,
+                          ReferenceMetaData Data) override {
     if (SeenDecls.insert(D).second)
       tryDemangleDecl(D, Range, /*isRef=*/true);
 
     if (T) {
       T = T->getRValueType();
-      tryDemangleType(T, D->getDeclContext(), Range);
+      tryDemangleType(T,
+                      (NestedDCs.empty()
+                       ? D->getDeclContext()
+                       : NestedDCs.back()),
+                      Range);
     }
     return true;
   }
 
 private:
   void tryDemangleType(Type T, const DeclContext *DC, CharSourceRange range) {
-    Mangle::Mangler Man(/* DWARFMangling */true);
-    Man.mangleTypeForDebugger(T, DC);
-    std::string mangledName(Man.finalize());
+    Mangle::ASTMangler Mangler;
+    std::string mangledName(Mangler.mangleTypeForDebugger(
+        T, DC, DC->getGenericEnvironmentOfContext()));
     std::string Error;
     Type ReconstructedType =
         getTypeFromMangledSymbolname(Ctx, mangledName, Error);
@@ -2558,7 +2632,8 @@ private:
     } else {
       Stream << "FAILURE";
     }
-    Stream << "\tfor '" << range.str() << "' mangled=" << mangledName << "\n";
+    Stream << "\tfor '" << range.str() << "' mangled=" << mangledName << " "
+           << Error << "\n";
   }
 
   void tryDemangleDecl(ValueDecl *VD, CharSourceRange range, bool isRef) {
@@ -2578,18 +2653,20 @@ private:
     if (Decl *reDecl = getDeclFromUSR(Ctx, USR, error)) {
       PrintOptions POpts;
       POpts.PreferTypeRepr = false;
+      POpts.PrintParameterSpecifiers = true;
       reDecl->print(Stream, POpts);
     } else {
       Stream << "FAILURE";
     }
-    Stream << "\tfor '" << range.str() << "' usr=" << USR << "\n";
+    Stream << "\tfor '" << range.str() << "' usr=" << USR << " " << error
+           << "\n";
   }
 };
 
 static int doReconstructType(const CompilerInvocation &InitInvok,
                              StringRef SourceFilename) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFilename);
   Invocation.getLangOptions().DisableAvailabilityChecking = false;
 
   CompilerInstance CI;
@@ -2612,10 +2689,186 @@ static int doReconstructType(const CompilerInvocation &InitInvok,
   return 0;
 }
 
+static int doPrintRangeInfo(const CompilerInvocation &InitInvok,
+                            StringRef SourceFileName,
+                            StringRef StartPos,
+                            StringRef EndPos) {
+  auto StartOp = parseLineCol(StartPos);
+  auto EndOp = parseLineCol(EndPos);
+  if (!StartOp.hasValue() || !EndOp.hasValue())
+    return 1;
+  auto StartLineCol = StartOp.getValue();
+  auto EndLineCol = EndOp.getValue();
+  CompilerInvocation Invocation(InitInvok);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFileName);
+  Invocation.getLangOptions().DisableAvailabilityChecking = false;
+  Invocation.getLangOptions().BuildSyntaxTree = true;
+  Invocation.getLangOptions().CollectParsedToken = true;
+
+  CompilerInstance CI;
+
+  // Display diagnostics to stderr.
+  PrintingDiagnosticConsumer PrintDiags;
+  CI.addDiagnosticConsumer(&PrintDiags);
+  if (CI.setup(Invocation))
+    return 1;
+  CI.performSema();
+  SourceFile *SF = nullptr;
+  for (auto Unit : CI.getMainModule()->getFiles()) {
+    SF = dyn_cast<SourceFile>(Unit);
+    if (SF)
+      break;
+  }
+  assert(SF && "no source file?");
+  assert(SF->getBufferID().hasValue() && "no buffer id?");
+  SourceManager &SM = SF->getASTContext().SourceMgr;
+  unsigned bufferID = SF->getBufferID().getValue();
+  SourceLoc StartLoc = SM.getLocForLineCol(bufferID, StartLineCol.first,
+                                           StartLineCol.second);
+  SourceLoc EndLoc = SM.getLocForLineCol(bufferID, EndLineCol.first,
+                                         EndLineCol.second);
+  RangeResolver Resolver(*SF, StartLoc, EndLoc);
+  ResolvedRangeInfo Result = Resolver.resolve();
+  Result.print(llvm::outs());
+  return 0;
+}
+
+namespace {
+  class PrintIndexDataConsumer : public IndexDataConsumer {
+    raw_ostream &OS;
+    bool shouldIndexLocals;
+    bool firstSourceEntity = true;
+
+    void printSymbolInfo(SymbolInfo SymInfo) {
+      OS << getSymbolKindString(SymInfo.Kind);
+      if (SymInfo.SubKind != SymbolSubKind::None)
+        OS << '/' << getSymbolSubKindString(SymInfo.SubKind);
+      if (SymInfo.Properties) {
+        OS << '(';
+        printSymbolProperties(SymInfo.Properties, OS);
+        OS << ')';
+      }
+      OS << '/' << getSymbolLanguageString(SymInfo.Lang);
+    }
+
+  public:
+    PrintIndexDataConsumer(raw_ostream &OS, bool indexLocals = false) :
+      OS(OS), shouldIndexLocals(indexLocals) {}
+
+    bool indexLocals() override { return shouldIndexLocals; }
+    void failed(StringRef error) override {}
+
+    bool recordHash(StringRef hash, bool isKnown) override { return true; }
+    bool startDependency(StringRef name, StringRef path, bool isClangModule,
+                         bool isSystem, StringRef hash) override {
+      OS << (isClangModule ? "clang-module" : "module") << " | ";
+      OS << (isSystem ? "system" : "user") << " | ";
+      OS << name << " | " << path << "-" << hash << "\n";
+      return true;
+    }
+    bool finishDependency(bool isClangModule) override {
+      return true;
+    }
+
+    Action startSourceEntity(const IndexSymbol &symbol) override {
+      if (firstSourceEntity) {
+        firstSourceEntity = false;
+        OS << "------------\n";
+      }
+      OS << symbol.line << ':' << symbol.column << " | ";
+      printSymbolInfo(symbol.symInfo);
+      OS << " | " << symbol.name << " | " << symbol.USR << " | ";
+      clang::index::printSymbolRoles(symbol.roles, OS);
+      OS << " | rel: " << symbol.Relations.size() << "\n";
+
+      for (auto Relation : symbol.Relations) {
+        OS << "  ";
+        clang::index::printSymbolRoles(Relation.roles, OS);
+        OS << " | ";
+        printSymbolInfo(Relation.symInfo);
+        OS << " | " << Relation.name << " | " << Relation.USR << "\n";
+      }
+      return Continue;
+    }
+    bool finishSourceEntity(SymbolInfo symInfo, SymbolRoleSet roles) override {
+      return true;
+    }
+
+    void finish() override {}
+  };
+
+} // anonymous namespace
+
+static int doPrintIndexedSymbols(const CompilerInvocation &InitInvok,
+                                StringRef SourceFileName, bool indexLocals) {
+
+  CompilerInvocation Invocation(InitInvok);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFileName);
+  Invocation.getLangOptions().DisableAvailabilityChecking = false;
+  Invocation.getLangOptions().TypoCorrectionLimit = 0;
+
+  CompilerInstance CI;
+
+  // Display diagnostics to stderr.
+  PrintingDiagnosticConsumer PrintDiags;
+  CI.addDiagnosticConsumer(&PrintDiags);
+
+  if (CI.setup(Invocation))
+    return 1;
+  CI.performSema();
+  SourceFile *SF = nullptr;
+  for (auto Unit : CI.getMainModule()->getFiles()) {
+    SF = dyn_cast<SourceFile>(Unit);
+    if (SF)
+      break;
+  }
+  assert(SF && "no source file?");
+  assert(SF->getBufferID().hasValue() && "no buffer id?");
+
+  llvm::outs() << llvm::sys::path::filename(SF->getFilename()) << '\n';
+  llvm::outs() << "------------\n";
+  PrintIndexDataConsumer consumer(llvm::outs(), indexLocals);
+  indexSourceFile(SF, StringRef(), consumer);
+
+  return 0;
+}
+
+static int doPrintIndexedSymbolsFromModule(const CompilerInvocation &InitInvok,
+                                           StringRef ModuleName) {
+  CompilerInvocation Invocation(InitInvok);
+
+  CompilerInstance CI;
+  // Display diagnostics to stderr.
+  PrintingDiagnosticConsumer PrintDiags;
+  CI.addDiagnosticConsumer(&PrintDiags);
+  if (CI.setup(Invocation))
+    return 1;
+
+  auto &Context = CI.getASTContext();
+
+  // Load standard library so that Clang importer can use it.
+  auto *Stdlib = getModuleByFullName(Context, Context.StdlibModuleName);
+  if (!Stdlib) {
+    llvm::errs() << "Failed loading stdlib\n";
+    return 1;
+  }
+
+  auto *M = getModuleByFullName(Context, ModuleName);
+  if (!M) {
+    llvm::errs() << "Failed loading " << ModuleName << "\n";
+    return 1;
+  }
+
+  PrintIndexDataConsumer consumer(llvm::outs());
+  indexModule(M, StringRef(), consumer);
+
+  return 0;
+}
+
 static int doPrintUSRs(const CompilerInvocation &InitInvok,
                        StringRef SourceFilename) {
   CompilerInvocation Invocation(InitInvok);
-  Invocation.addInputFilename(SourceFilename);
+  Invocation.getFrontendOptions().InputsAndOutputs.addInputFile(SourceFilename);
 
   ClangImporterOptions &ImporterOpts = Invocation.getClangImporterOptions();
   ImporterOpts.DetailedPreprocessingRecord = true;
@@ -2675,7 +2928,8 @@ static int doTestCompilerInvocationFromModule(StringRef ModuleFilePath) {
 void anchorForGetMainExecutable() {}
 
 int main(int argc, char *argv[]) {
-  INITIALIZE_LLVM(argc, argv);
+  PROGRAM_START(argc, argv);
+  INITIALIZE_LLVM();
 
   if (argc > 1) {
     // Handle integrated test tools which do not use
@@ -2696,6 +2950,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  llvm::cl::HideUnrelatedOptions(options::Category);
   llvm::cl::ParseCommandLineOptions(argc, argv, "Swift IDE Test\n");
 
   if (options::Action == ActionType::None) {
@@ -2719,12 +2974,13 @@ int main(int argc, char *argv[]) {
 
   if (options::Action == ActionType::DumpCompletionCache) {
     if (options::InputFilenames.empty()) {
-      llvm::errs() << "-dump-completin-cache requires an input file\n";
+      llvm::errs() << "-dump-completion-cache requires an input file\n";
       return 1;
     }
 
     ide::PrintingCodeCompletionConsumer Consumer(
-        llvm::outs(), options::CodeCompletionKeywords);
+        llvm::outs(), options::CodeCompletionKeywords,
+        options::CodeCompletionComments);
     for (StringRef filename : options::InputFilenames) {
       auto resultsOpt = ide::OnDiskCodeCompletionCache::getFromFile(filename);
       if (!resultsOpt) {
@@ -2760,7 +3016,7 @@ int main(int argc, char *argv[]) {
   CompilerInvocation InitInvok;
 
   for (auto &File : options::InputFilenames)
-    InitInvok.addInputFilename(File);
+    InitInvok.getFrontendOptions().InputsAndOutputs.addInputFile(File);
   if (!options::InputFilenames.empty())
     InitInvok.setInputKind(InputFileKind::IFK_Swift_Library);
 
@@ -2770,29 +3026,59 @@ int main(int argc, char *argv[]) {
   InitInvok.setModuleName(options::ModuleName);
 
   InitInvok.setSDKPath(options::SDK);
+  InitInvok.getLangOptions().CollectParsedToken = true;
+  InitInvok.getLangOptions().BuildSyntaxTree = true;
+  if (options::DisableObjCInterop) {
+    InitInvok.getLangOptions().EnableObjCInterop = false;
+  } else if (options::EnableObjCInterop) {
+    InitInvok.getLangOptions().EnableObjCInterop = true;
+  } else if (!options::Triple.empty()) {
+    InitInvok.getLangOptions().EnableObjCInterop =
+        llvm::Triple(options::Triple).isOSDarwin();
+  }
   if (!options::Triple.empty())
     InitInvok.setTargetTriple(options::Triple);
   if (!options::SwiftVersion.empty()) {
+    // Honor the *last* -swift-version specified.
+    const auto &LastSwiftVersion =
+      options::SwiftVersion[options::SwiftVersion.size()-1];
     if (auto swiftVersion =
-          version::Version::parseVersionString(options::SwiftVersion,
+          version::Version::parseVersionString(LastSwiftVersion,
                                                SourceLoc(), nullptr)) {
-      InitInvok.getLangOptions().EffectiveLanguageVersion = *swiftVersion;
+      if (auto actual = swiftVersion.getValue().getEffectiveLanguageVersion())
+        InitInvok.getLangOptions().EffectiveLanguageVersion = actual.getValue();
     }
   }
   InitInvok.getClangImporterOptions().ModuleCachePath =
     options::ModuleCachePath;
+  InitInvok.getClangImporterOptions().PrecompiledHeaderOutputDir =
+    options::PCHOutputDir;
   InitInvok.setImportSearchPaths(options::ImportPaths);
-  InitInvok.setFrameworkSearchPaths(options::FrameworkPaths);
+  std::vector<SearchPathOptions::FrameworkSearchPath> FramePaths;
+  for (const auto &path : options::FrameworkPaths) {
+    FramePaths.push_back({path, /*isSystem=*/false});
+  }
+  for (const auto &path : options::SystemFrameworkPaths) {
+    FramePaths.push_back({path, /*isSystem=*/true});
+  }
+  InitInvok.setFrameworkSearchPaths(FramePaths);
   InitInvok.getFrontendOptions().EnableSourceImport |=
     options::EnableSourceImport;
   InitInvok.getFrontendOptions().ImplicitObjCHeaderPath =
+    options::ImportObjCHeader;
+  InitInvok.getClangImporterOptions().BridgingHeader =
     options::ImportObjCHeader;
   InitInvok.getLangOptions().EnableAccessControl =
     !options::DisableAccessControl;
   InitInvok.getLangOptions().CodeCompleteInitsInPostfixExpr |=
       options::CodeCompleteInitsInPostfixExpr;
+  InitInvok.getLangOptions().CodeCompleteCallPatternHeuristics |=
+      options::CodeCompleteCallPatternHeuristics;
   InitInvok.getLangOptions().InferImportAsMember |=
     options::InferImportAsMember;
+  InitInvok.getLangOptions().EnableSwift3ObjCInference =
+    options::EnableSwift3ObjCInference ||
+    InitInvok.getLangOptions().isSwiftVersion3();
   InitInvok.getClangImporterOptions().ImportForwardDeclarations |=
     options::ObjCForwardDeclarations;
   InitInvok.getClangImporterOptions().InferImportAsMember |=
@@ -2827,7 +3113,7 @@ int main(int argc, char *argv[]) {
 
   PrintOptions PrintOpts;
   if (options::PrintInterface) {
-    PrintOpts = PrintOptions::printInterface();
+    PrintOpts = PrintOptions::printModuleInterface();
   } else if (options::PrintInterfaceForDoc) {
     PrintOpts = PrintOptions::printDocInterface();
   } else {
@@ -2840,8 +3126,8 @@ int main(int argc, char *argv[]) {
     PrintOpts.PreferTypeRepr = options::PreferTypeRepr;
     PrintOpts.ExplodePatternBindingDecls = options::ExplodePatternBindingDecls;
     PrintOpts.PrintImplicitAttrs = options::PrintImplicitAttrs;
-    PrintOpts.PrintAccessibility = options::PrintAccessibility;
-    PrintOpts.AccessibilityFilter = options::AccessibilityFilter;
+    PrintOpts.PrintAccess = options::PrintAccess;
+    PrintOpts.AccessFilter = options::AccessFilter;
     PrintOpts.PrintDocumentationComments = !options::SkipDocumentationComments;
     PrintOpts.PrintRegularClangComments = options::PrintRegularComments;
     PrintOpts.SkipPrivateStdlibDecls = options::SkipPrivateStdlibDecls;
@@ -2887,7 +3173,8 @@ int main(int argc, char *argv[]) {
                                 options::SecondSourceFilename,
                                 options::CodeCompletionToken,
                                 options::CodeCompletionDiagnostics,
-                                options::CodeCompletionKeywords);
+                                options::CodeCompletionKeywords,
+                                options::CodeCompletionComments);
     break;
 
   case ActionType::REPLCodeCompletion:
@@ -3018,6 +3305,23 @@ int main(int argc, char *argv[]) {
   case ActionType::ReconstructType:
     ExitCode = doReconstructType(InitInvok, options::SourceFilename);
     break;
+  case ActionType::Range:
+    ExitCode = doPrintRangeInfo(InitInvok, options::SourceFilename,
+                                options::LineColumnPair,
+                                options::EndLineColumnPair);
+    break;
+  case ActionType::PrintIndexedSymbols:
+      if (options::ModuleToPrint.empty()) {
+        ExitCode = doPrintIndexedSymbols(InitInvok, options::SourceFilename,
+                                         options::IncludeLocals);
+      } else {
+        if (options::ModuleToPrint.size() > 1) {
+          llvm::errs() << "printing symbols for the first module name, the rest "
+            "are ignored";
+        }
+        ExitCode = doPrintIndexedSymbolsFromModule(InitInvok,
+                                               options::ModuleToPrint.front());
+      }
   }
 
   if (options::PrintStats)

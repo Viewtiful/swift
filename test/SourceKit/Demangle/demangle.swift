@@ -14,6 +14,6 @@
 
 // RUN: %sourcekitd-test -req=mangle Foo.Baru Swift.Beer | %FileCheck %s -check-prefix=MANGLED
 // MANGLED:      START MANGLE
-// MANGLED-NEXT: _TtC3Foo4Baru
-// MANGLED-NEXT: _TtCs4Beer
+// MANGLED-NEXT: $S3Foo4BaruCD
+// MANGLED-NEXT: $Ss4BeerCD
 // MANGLED-NEXT: END MANGLE

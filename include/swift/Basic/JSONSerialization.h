@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -26,6 +26,8 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Regex.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <vector>
 
 namespace swift {
 namespace json {
@@ -105,6 +107,30 @@ struct ScalarTraits {
   //
   // Function to determine if the value should be quoted.
   //static bool mustQuote(StringRef);
+};
+
+
+/// This class should be specialized by any type that can be 'null' in JSON.
+/// For example:
+///
+///    template<>
+///    struct NullableTraits<MyType *> > {
+///      static bool isNull(MyType *&ptr) {
+///        return !ptr;
+///      }
+///      static MyType &get(MyType *&ptr) {
+///        return *ptr;
+///      }
+///    };
+template<typename T>
+struct NullableTraits {
+  // Must provide:
+  //
+  // Function to return true if the value is 'null'.
+  // static bool isNull(const T &Val);
+  //
+  // Function to return a reference to the unwrapped value.
+  // static T::value_type &get(const T &Val);
 };
 
 
@@ -247,6 +273,23 @@ template<typename T>
 struct has_ArrayTraits : public std::integral_constant<bool,
     has_ArrayMethodTraits<T>::value > { };
 
+// Test if NullableTraits<T> is defined on type T.
+template <class T>
+struct has_NullableTraits
+{
+  typedef bool (*Signature_isNull)(T&);
+
+  template <typename U>
+  static char test(SameType<Signature_isNull, &U::isNull> *);
+
+  template <typename U>
+  static double test(...);
+
+public:
+  static bool const value =
+  (sizeof(test<NullableTraits<T>>(nullptr)) == 1);
+};
+
 inline bool isNumber(StringRef S) {
   static const char DecChars[] = "0123456789";
   if (S.find_first_not_of(DecChars) == StringRef::npos)
@@ -283,6 +326,7 @@ struct missingTraits : public std::integral_constant<bool,
     !has_ScalarEnumerationTraits<T>::value
  && !has_ScalarBitSetTraits<T>::value
  && !has_ScalarTraits<T>::value
+ && !has_NullableTraits<T>::value
  && !has_ObjectTraits<T>::value
  && !has_ArrayTraits<T>::value> {};
 
@@ -336,6 +380,7 @@ public:
   void endBitSetScalar();
 
   void scalarString(StringRef &, bool);
+  void null();
 
   template <typename T>
   void enumCase(T &Val, const char* Str, const T ConstVal) {
@@ -443,6 +488,16 @@ private:
 
 private:
   void indent();
+};
+
+template <typename T> struct ArrayTraits<std::vector<T>> {
+  static size_t size(Output &out, std::vector<T> &seq) { return seq.size(); }
+
+  static T &element(Output &out, std::vector<T> &seq, size_t index) {
+    if (index >= seq.size())
+      seq.resize(index + 1);
+    return seq[index];
+  }
 };
 
 template<>
@@ -564,6 +619,16 @@ jsonize(Output &out, T &Val, bool) {
     StringRef Str = Buffer.str();
     out.scalarString(Str, ScalarTraits<T>::mustQuote(Str));
   }
+}
+
+
+template<typename T>
+typename std::enable_if<has_NullableTraits<T>::value,void>::type
+jsonize(Output &out, T &Obj, bool) {
+  if (NullableTraits<T>::isNull(Obj))
+    out.null();
+  else
+    jsonize(out, NullableTraits<T>::get(Obj), true);
 }
 
 

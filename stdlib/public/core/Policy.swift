@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 // Swift Standard Prolog Library.
@@ -15,8 +15,8 @@
 //===----------------------------------------------------------------------===//
 // Standardized uninhabited type
 //===----------------------------------------------------------------------===//
-/// The return type of functions that do not return normally; a type with no
-/// values.
+/// The return type of functions that do not return normally, that is, a type
+/// with no values.
 ///
 /// Use `Never` as the return type when declaring a closure, function, or
 /// method that unconditionally throws an error, traps, or otherwise does
@@ -31,16 +31,16 @@ public enum Never {}
 //===----------------------------------------------------------------------===//
 // Standardized aliases
 //===----------------------------------------------------------------------===//
-/// The return type of functions that don't explicitly specify a return type;
-/// an empty tuple (i.e., `()`).
+/// The return type of functions that don't explicitly specify a return type,
+/// that is, an empty tuple `()`.
 ///
 /// When declaring a function or method, you don't need to specify a return
 /// type if no value will be returned. However, the type of a function,
 /// method, or closure always includes a return type, which is `Void` if
 /// otherwise unspecified.
 ///
-/// Use `Void` or an empty tuple as the return type when declaring a
-/// closure, function, or method that doesn't return a value.
+/// Use `Void` or an empty tuple as the return type when declaring a closure,
+/// function, or method that doesn't return a value.
 ///
 ///     // No return type declared:
 ///     func logMessage(_ s: String) {
@@ -248,24 +248,11 @@ public typealias _MaxBuiltinFloatType = Builtin.FPIEEE64
 ///         print("'obj' does not have a 'getIntegerValue()' method")
 ///     }
 ///     // Prints "The value of 'obj' is 100"
-///
-/// - SeeAlso: `AnyClass`
-@objc
-public protocol AnyObject : class {}
+public typealias AnyObject = Builtin.AnyObject
 #else
 /// The protocol to which all classes implicitly conform.
-///
-/// - SeeAlso: `AnyClass`
-public protocol AnyObject : class {}
+public typealias AnyObject = Builtin.AnyObject
 #endif
-// Implementation note: the `AnyObject` protocol *must* not have any method or
-// property requirements.
-
-// FIXME: AnyObject should have an alternate version for non-objc without
-// the @objc attribute, but AnyObject needs to be not be an address-only
-// type to be able to be the target of castToNativeObject and an empty
-// non-objc protocol appears not to be. There needs to be another way to make
-// this the right kind of object.
 
 /// The protocol to which all class types implicitly conform.
 ///
@@ -294,8 +281,6 @@ public protocol AnyObject : class {}
 ///
 ///     print(getDefaultValue(NSString.self))
 ///     // Prints "nil"
-///
-/// - SeeAlso: `AnyObject`
 public typealias AnyClass = AnyObject.Type
 
 /// A type that supports standard bitwise arithmetic operators.
@@ -387,9 +372,10 @@ public typealias AnyClass = AnyObject.Type
 /// - `x & Self.allZeros == .allZeros`
 /// - `x & ~Self.allZeros == x`
 /// - `~x == x ^ ~Self.allZeros`
-///
-/// - SeeAlso: `OptionSet`
-public protocol BitwiseOperations {
+@available(swift, deprecated: 3.1, obsoleted: 4.0, message: "Use FixedWidthInteger protocol instead")
+public typealias BitwiseOperations = _BitwiseOperations
+
+public protocol _BitwiseOperations {
   /// Returns the intersection of bits set in the two arguments.
   ///
   /// The bitwise AND operator (`&`) returns a value that has each bit set to
@@ -484,46 +470,82 @@ public protocol BitwiseOperations {
   ///
   /// [identity element]:http://en.wikipedia.org/wiki/Identity_element
   /// [fixed point]:http://en.wikipedia.org/wiki/Fixed_point_(mathematics)
+  @available(swift, deprecated: 3.1, obsoleted: 4.0, message: "Use 0 or init() of a type conforming to FixedWidthInteger")
   static var allZeros: Self { get }
 }
 
-/// Calculates the union of bits sets in the two arguments and stores the result
-/// in the first argument.
-///
-/// - Parameters:
-///   - lhs: A value to update with the union of bits set in the two arguments.
-///   - rhs: Another value.
-public func |= <T : BitwiseOperations>(lhs: inout T, rhs: T) {
-  lhs = lhs | rhs
-}
+extension _BitwiseOperations {
+  /// Calculates the union of bits sets in the two arguments and stores the result
+  /// in the first argument.
+  ///
+  /// - Parameters:
+  ///   - lhs: A value to update with the union of bits set in the two arguments.
+  ///   - rhs: Another value.
+  @_inlineable // FIXME(sil-serialize-all)
+  @available(swift, obsoleted: 4.1)
+  public static func |= (lhs: inout Self, rhs: Self) {
+    lhs = lhs | rhs
+  }
 
-/// Calculates the intersections of bits sets in the two arguments and stores
-/// the result in the first argument.
-///
-/// - Parameters:
-///   - lhs: A value to update with the intersections of bits set in the two
-///     arguments.
-///   - rhs: Another value.
-public func &= <T : BitwiseOperations>(lhs: inout T, rhs: T) {
-  lhs = lhs & rhs
-}
+  /// Calculates the intersections of bits sets in the two arguments and stores
+  /// the result in the first argument.
+  ///
+  /// - Parameters:
+  ///   - lhs: A value to update with the intersections of bits set in the two
+  ///     arguments.
+  ///   - rhs: Another value.
+  @_inlineable // FIXME(sil-serialize-all)
+  @available(swift, obsoleted: 4.1)
+  public static func &= (lhs: inout Self, rhs: Self) {
+    lhs = lhs & rhs
+  }
 
-/// Calculates the bits that are set in exactly one of the two arguments and
-/// stores the result in the first argument.
-///
-/// - Parameters:
-///   - lhs: A value to update with the bits that are set in exactly one of the
-///     two arguments.
-///   - rhs: Another value.
-public func ^= <T : BitwiseOperations>(lhs: inout T, rhs: T) {
-  lhs = lhs ^ rhs
+  /// Calculates the bits that are set in exactly one of the two arguments and
+  /// stores the result in the first argument.
+  ///
+  /// - Parameters:
+  ///   - lhs: A value to update with the bits that are set in exactly one of the
+  ///     two arguments.
+  ///   - rhs: Another value.
+  @_inlineable // FIXME(sil-serialize-all)
+  @available(swift, obsoleted: 4.1)
+  public static func ^= (lhs: inout Self, rhs: Self) {
+    lhs = lhs ^ rhs
+  }
 }
 
 //===----------------------------------------------------------------------===//
 // Standard pattern matching forms
 //===----------------------------------------------------------------------===//
 
-// Equatable types can be matched in patterns by value equality.
+/// Returns a Boolean value indicating whether two arguments match by value
+/// equality.
+///
+/// The pattern-matching operator (`~=`) is used internally in `case`
+/// statements for pattern matching. When you match against an `Equatable`
+/// value in a `case` statement, this operator is called behind the scenes.
+///
+///     let weekday = 3
+///     let lunch: String
+///     switch weekday {
+///     case 3:
+///         lunch = "Taco Tuesday!"
+///     default:
+///         lunch = "Pizza again."
+///     }
+///     // lunch == "Taco Tuesday!"
+///
+/// In this example, the `case 3` expression uses this pattern-matching
+/// operator to test whether `weekday` is equal to the value `3`.
+///
+/// - Note: In most cases, you should use the equal-to operator (`==`) to test
+///   whether two instances are equal. The pattern-matching operator is
+///   primarily intended to enable `case` statement pattern matching.
+///
+/// - Parameters:
+///   - lhs: A value to compare.
+///   - rhs: Another value to compare.
+@_inlineable // FIXME(sil-serialize-all)
 @_transparent
 public func ~= <T : Equatable>(a: T, b: T) -> Bool {
   return a == b
@@ -533,17 +555,17 @@ public func ~= <T : Equatable>(a: T, b: T) -> Bool {
 // Standard precedence groups
 //===----------------------------------------------------------------------===//
 
-precedencegroup FunctionArrowPrecedence {
-  associativity: right
-}
 precedencegroup AssignmentPrecedence {
   assignment: true
   associativity: right
-  higherThan: FunctionArrowPrecedence
+}
+precedencegroup FunctionArrowPrecedence {
+  associativity: right
+  higherThan: AssignmentPrecedence
 }
 precedencegroup TernaryPrecedence {
   associativity: right
-  higherThan: AssignmentPrecedence
+  higherThan: FunctionArrowPrecedence
 }
 precedencegroup DefaultPrecedence {
   higherThan: TernaryPrecedence
@@ -589,6 +611,7 @@ precedencegroup BitwiseShiftPrecedence {
 // Standard postfix operators.
 postfix operator ++
 postfix operator --
+postfix operator ...
 
 // Optional<T> unwrapping operator is built into the compiler as a part of
 // postfix expression grammar.
@@ -602,13 +625,17 @@ prefix operator !
 prefix operator ~
 prefix operator +
 prefix operator -
+prefix operator ...
+prefix operator ..<
 
 // Standard infix operators.
 
 // "Exponentiative"
 
-infix operator << : BitwiseShiftPrecedence
-infix operator >> : BitwiseShiftPrecedence
+infix operator  << : BitwiseShiftPrecedence
+infix operator &<< : BitwiseShiftPrecedence
+infix operator  >> : BitwiseShiftPrecedence
+infix operator &>> : BitwiseShiftPrecedence
 
 // "Multiplicative"
 
@@ -636,6 +663,7 @@ infix operator  ..< : RangeFormationPrecedence
 // infix operator as : CastingPrecedence
 
 // "Coalescing"
+
 infix operator ?? : NilCoalescingPrecedence
 
 // "Comparative"
@@ -659,7 +687,6 @@ infix operator && : LogicalConjunctionPrecedence
 
 infix operator || : LogicalDisjunctionPrecedence
 
-
 // User-defined ternary operators are not supported. The ? : operator is
 // hardcoded as if it had the following attributes:
 // operator ternary ? : : TernaryPrecedence
@@ -670,16 +697,18 @@ infix operator || : LogicalDisjunctionPrecedence
 
 // Compound
 
-infix operator  *= : AssignmentPrecedence
-infix operator  /= : AssignmentPrecedence
-infix operator  %= : AssignmentPrecedence
-infix operator  += : AssignmentPrecedence
-infix operator  -= : AssignmentPrecedence
-infix operator <<= : AssignmentPrecedence
-infix operator >>= : AssignmentPrecedence
-infix operator  &= : AssignmentPrecedence
-infix operator  ^= : AssignmentPrecedence
-infix operator  |= : AssignmentPrecedence
+infix operator   *= : AssignmentPrecedence
+infix operator   /= : AssignmentPrecedence
+infix operator   %= : AssignmentPrecedence
+infix operator   += : AssignmentPrecedence
+infix operator   -= : AssignmentPrecedence
+infix operator  <<= : AssignmentPrecedence
+infix operator &<<= : AssignmentPrecedence
+infix operator  >>= : AssignmentPrecedence
+infix operator &>>= : AssignmentPrecedence
+infix operator   &= : AssignmentPrecedence
+infix operator   ^= : AssignmentPrecedence
+infix operator   |= : AssignmentPrecedence
 
 // Workaround for <rdar://problem/14011860> SubTLF: Default
 // implementations in protocols.  Library authors should ensure
@@ -688,7 +717,3 @@ infix operator  |= : AssignmentPrecedence
 // example of how this operator is used, and how its use can be hidden
 // from users.
 infix operator ~>
-
-@available(*, unavailable, renamed: "BitwiseOperations")
-public typealias BitwiseOperationsType = BitwiseOperations
-
